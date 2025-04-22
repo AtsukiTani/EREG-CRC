@@ -1,0 +1,1229 @@
+---
+title: "Fig2"
+author: "Atsuki Taniguchi"
+date: "`r format(Sys.time(), '%Y年%m月%d日')`"
+output:
+ html_document:
+  toc: true
+  toc_float: true
+  toc_depth: 6 
+  number_sections: true
+---
+```{=html}
+<style>
+div.blue pre { background-color:lightblue !important; }
+div.blue pre.r { background-color:lightyellow !important; }
+</style>
+```
+<div class = "blue">
+
+```{r setup, include=FALSE}
+library(kableExtra)
+
+knitr::opts_chunk$set(cache=FALSE, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.width=10, fig.height=8)
+
+```
+
+```{r}
+# Helper function for package info
+getPkgInfo <- function(info){
+  #info <- sessionInfo()
+  pkg <- info$otherPkgs
+  pkg.info <- t(sapply(pkg, function(p){
+    out <- matrix(c(Package=ifelse(is.null(p$Package),"-",p$Package),
+                    Version=ifelse(is.null(p$Version),"-",p$Version),
+                    Title=ifelse(is.null(p$Title),"-",p$Title),
+                    License=ifelse(is.null(p$License),"-",p$License),
+                    Repository=ifelse(is.null(p$Repository),"-",p$Repository)), nrow=1, ncol=5)
+  }))
+  colnames(pkg.info) <- c("Package","Version","Overview","License","Repository")
+  return(pkg.info)
+}
+```
+
+# Loading packages
+```{r}
+library(Seurat);library(tidyverse);library(infercnv);library(DESeq2);library(sva);library(ggfortify);library(ggpubr);library(SummarizedExperiment);library(MatrixGenerics);library(viridis);library(patchwork);library(ggrepel)
+```
+
+# Subset and re-integrate epithelial (tumor) cells: Fig2A,2B,2C,supple2B
+```{r}
+set.seed(123)
+
+obj <- readRDS("~/Primarytumor/merge_rpca_LR.RDS")
+FeaturePlot(obj, features = "EPCAM", reduction = "umap") # Fig2A
+DimPlot(obj, reduction = "umap", label = T)
+
+# Subset for Tumor Epithelial cells based on original clustering and condition
+obj <- subset(obj, condition=="Tumor")
+obj <- subset(obj, idents = c("3", "9", "12", "20"))
+
+# Filter out patients/samples with few cells
+count <- table(obj@meta.data[["PatientID"]])
+patient <- names(count[count <= 100])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$PatientID %in% patient, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+count <- table(obj@meta.data[["sample"]])
+small_samples <- names(count[count < 100])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$sample %in% small_samples, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+plot <- DimPlot(obj, label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+obj <- subset(obj, cells = select1)
+
+# Remove all reductions
+obj@reductions <- list()
+
+obj@assays$RNA <- split(x=obj@assays$RNA, f=obj@meta.data$PatientID)
+
+# Standard Seurat workflow on subset
+obj <- NormalizeData(obj)
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj)
+obj <- RunPCA(obj)
+
+options(future.globals.maxSize = 50 * 1024^3)
+
+# Integrate layers using RPCA
+obj <- IntegrateLayers(object = obj, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",
+                       verbose = FALSE,
+                       k.weight=94)
+
+obj[["RNA"]] <- JoinLayers(obj[["RNA"]])
+
+# Downstream analysis on re-integrated epithelial cells
+obj <- FindNeighbors(obj, reduction = "integrated.rpca", dims = 1:30)
+obj <- FindClusters(obj, resolution = 0.10)
+obj <- RunUMAP(obj, dims = 1:30, reduction = "integrated.rpca")
+DimPlot(obj, label=T)
+
+saveRDS(obj, "~/Primarytumor/tumor_integrated_LR.RDS")
+
+DimPlot(obj, label = T) #Fig2B
+DimPlot(obj, group.by = "Sidedness") #Fig2C
+DimPlot(obj, group.by = "PatientID") #suppleFig2B
+```
+
+# Prepare data for inferCNV (re-integrate tumor cells including normal samples for reference)
+```{r}
+set.seed(123)
+obj <- readRDS("~/Primarytumor/merge_rpca_LR.RDS")
+obj <- subset(obj, idents = c("3", "9", "12", "20"))
+
+count <- table(obj@meta.data[["PatientID"]])
+patient <- names(count[count <= 100])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$PatientID %in% patient, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+count <- table(obj@meta.data[["sample"]])
+small_samples <- names(count[count < 100])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$sample %in% small_samples, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+plot <- DimPlot(obj, label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+obj <- subset(obj, cells = select1)
+
+obj@reductions <- list()
+
+obj@assays$RNA <- split(x=obj@assays$RNA, f=obj@meta.data$PatientID)
+
+obj <- NormalizeData(obj)
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj)
+obj <- RunPCA(obj)
+
+options(future.globals.maxSize = 50 * 1024^3)
+
+obj <- IntegrateLayers(object = obj, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",
+                       verbose = FALSE,
+                       k.weight=94)
+
+obj[["RNA"]] <- JoinLayers(obj[["RNA"]])
+
+obj <- FindNeighbors(obj, reduction = "integrated.rpca", dims = 1:30)
+obj <- FindClusters(obj, resolution = 0.5)
+obj <- RunUMAP(obj, dims = 1:30, reduction = "integrated.rpca")
+
+saveRDS(obj, "~/Primarytumor/tumor_integrated_LR_normal.RDS")
+```
+
+# Run inferCNV: Fig2D
+
+```{r}
+obj <- readRDS("~/Primarytumor/tumor_integrated_LR_normal.RDS")
+counts_matrix <- LayerData(obj, assay="RNA", layer = "counts")
+
+# Malignant cells are grouped by Sidedness, others by condition
+annotations <- data.frame(
+  Cell = rownames(obj@meta.data),
+  Annotation = ifelse(obj@meta.data$condition == "Tumor",
+                      paste0("malignant_", obj@meta.data$Sidedness),
+                      obj@meta.data$condition)
+)
+
+write.table(annotations, "~/Primarytumor/annotations.txt", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+
+infercnv_obj = CreateInfercnvObject(raw_counts_matrix=counts_matrix,
+                                    annotations_file="~/Primarytumor/annotations.txt",
+                                    delim="\t",
+                                    gene_order_file="~/Primarytumor/hg38_gencode_v27.txt",
+                                    ref_group_names=c("Normal"))
+
+options(scipen = 100)
+
+infercnv_obj = infercnv::run(infercnv_obj,
+                             cutoff=0.1,  # use 1 for smart-seq, 0.1 for 10x-genomics
+                             out_dir="./inferCNV_sidedness",
+                             cluster_by_groups=T,   # cluster
+                             denoise=T,
+                             HMM=T,
+                             num_threads = 64,
+                             output_format = "pdf"
+                             ) #Fig2D
+```
+
+# DEGs between Left and Right sided tumors
+```{r}
+set.seed(123)
+
+obj <- readRDS("~/Primarytumor/tumor_integrated_LR.RDS")
+
+Idents(obj) <- "Sidedness"
+
+markers_R <- FindMarkers(obj, ident.1="R", ident.2="L", min.pct=0.4, only.pos=T)
+markers_L <- FindMarkers(obj, ident.1="L", ident.2="R", min.pct=0.4, only.pos=T)
+
+m_R <- markers_R %>%
+    dplyr::filter((avg_log2FC > 1 | avg_log2FC < -1) & p_val_adj < 0.01)
+m_L <- markers_L %>%
+    dplyr::filter((avg_log2FC > 1 | avg_log2FC < -1) & p_val_adj < 0.01)
+
+write.csv(m_R, "~/Primarytumor/markers_R.csv")
+write.csv(m_L, "~/Primarytumor/markers_L.csv")
+```
+
+# Feature plots for mucinous markers: suppleFig2A
+```{r}
+FeaturePlot(obj, "REG4", pt.size = 0.01, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) # SFig2A-1 
+FeaturePlot(obj, "SPINK4", pt.size = 0.01, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) # SFig2A-2
+FeaturePlot(obj, "FCGBP", pt.size = 0.01, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) # SFig2A-3
+FeaturePlot(obj, "MUC2", pt.size = 0.01, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) # SFig2A-4
+```
+
+# Heatmap of top DEGs between Left and Right sided tumors: Fig2E
+```{r}
+data <- FindMarkers(obj, ident.1="L", ident.2="R", min.pct=0.4)
+
+data$Expression <- "Neutral"
+data[data$avg_log2FC > 1 & data$p_val_adj < 0.01, "Expression"] <- "Upregulated"
+data[data$avg_log2FC < -1 & data$p_val_adj < 0.01, "Expression"] <- "Downregulated"
+
+data$gene <- rownames(data)
+data %>%
+    group_by(Expression) %>%
+    slice_head(n = 12) %>%
+    ungroup() -> top10
+top10 <- top10[top10$Expression != "Neutral", ]
+obj <- ScaleData(obj, features = rownames(obj))
+
+col <- viridis(n = 10)
+col <- c(col, rep(col[length(col)], times = 5))
+
+DoHeatmap(obj, features = top10$gene, group.by = "Sidedness",) + 
+  NoLegend() +
+  scale_fill_gradientn(colours = col) #Fig2E
+```
+
+# Add EGFR eligibility metadata column based on RAS status and Sidedness
+```{r}
+set.seed(123)
+obj <- readRDS("~/Primarytumor/merge_rpca_LR.RDS")
+
+obj@meta.data$EGFR_efficacy <- NA
+
+obj@meta.data$EGFR_efficacy[obj@meta.data$RAS == "wt" & obj@meta.data$Sidedness == "L"] <- "EGFR_eligible" #"Left_RAS-wild"
+obj@meta.data$EGFR_efficacy[obj@meta.data$RAS == "mut" & obj@meta.data$Sidedness == "L"] <- "EGFR_ineligible" #"Left_RAS-mut"
+obj@meta.data$EGFR_efficacy[obj@meta.data$RAS == "wt" & obj@meta.data$Sidedness == "R"] <- "EGFR_ineligible" #"Right_RAS-wild"
+obj@meta.data$EGFR_efficacy[obj@meta.data$RAS == "mut" & obj@meta.data$Sidedness == "R"] <- "EGFR_ineligible" #"Right_RAS-mut"
+
+DimPlot(obj, group.by = "EGFR_efficacy", reduction = "umap")
+
+saveRDS(obj, "~/Primarytumor/merge_rpca_EGFR.RDS")
+```
+
+# Heatmap of top DEGs based on EGFR efficacy in Epithelial cells: suppleFig3A
+```{r}
+obj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+obj <- subset(obj, cell_type=="Epithelial cell")
+
+plot <- DimPlot(obj, group.by="cell_type",label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+seu.filtered <- subset(obj, cells = select1)
+
+Idents(seu.filtered) <- "EGFR_efficacy"
+
+data <- FindMarkers(seu.filtered, ident.1="EGFR_eligible", ident.2="EGFR_ineligible", min.pct=0.4)
+
+data$Expression <- "Neutral"
+data[data$avg_log2FC > 1 & data$p_val_adj < 0.01, "Expression"] <- "Upregulated"
+data[data$avg_log2FC < -1 & data$p_val_adj < 0.01, "Expression"] <- "Downregulated"
+
+data$gene <- rownames(data)
+data %>%
+    group_by(Expression) %>%
+    slice_head(n = 12) %>%
+    ungroup() -> top10
+top10 <- top10[top10$Expression != "Neutral", ]
+obj <- ScaleData(obj, features = rownames(obj))
+
+col <- viridis(n = 10)
+col <- c(col, rep(col[length(col)], times = 5))
+
+DoHeatmap(obj, features = top10$gene, group.by = "EGFR_efficacy",) + 
+  NoLegend() +
+  scale_fill_gradientn(colours = col) #suppleFig3A
+```
+
+# Pseudobulk analysis of epithelial (tumor) cells: Fig2F
+```{r}
+obj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+obj <- subset(obj, cell_type=="Epithelial cell")
+
+plot <- DimPlot(obj, group.by="cell_type",label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+seu.filtered <- subset(obj, cells = select1)
+
+# Count cells per sample
+cell_counts <- table(seu.filtered@meta.data$sample)
+
+# Get samples with > 50 cells
+samples <- names(cell_counts[cell_counts > 50])
+samples
+
+seu.filtered <- subset(seu.filtered, sample %in% c(
+    "B_cac10", "B_cac11", "B_cac14", "B_cac4", "B_cac6",
+    "CRC-JSC-S04-GIS-T-US-1", "CRC-JSC-S04-GIS-T-US-2",
+    "CRC-JSC-S06-GIS-T-US-1", "CRC-JSC-S06-GIS-T-US-2",
+    "CRC-JSC-S07-GIS-T-US-1", "CRC-JSC-S07-GIS-T-US-2",
+    "CRC-JSC-S08-GIS-T-US-1", "CRC-JSC-S08-GIS-T-US-2",
+    "CRC-JSC-S12-GIS-T-US-1", "CRC-JSC-S12-GIS-T-US-2",
+    "CRC-JSC-S13-GIS-T-US-1", "CRC-JSC-S13-GIS-T-US-2",
+    "CRC-JSC-S14-GIS-T-US-1", "CRC-JSC-S14-GIS-T-US-2",
+    "CRC-JSC-S15-GIS-TS-US-1",
+    "EXT009", "EXT010", "EXT011", "EXT012", "EXT013",
+    "EXT014", "EXT015", "EXT016", "EXT017", "EXT018",
+    "EXT019", "EXT020", "EXT025", "EXT027", "EXT028",
+    "EXT029", "EXT031", "EXT032", "EXT094", "EXT095",
+    "EXT097", "EXT121", "EXT122", "EXT123",
+    "MUX8563", "MUX8564", "MUX8566", "MUX8568", "MUX8569",
+    "MUX8570", "MUX8571", "MUX8580", "MUX8584",
+    "MUX8631", "MUX8633", "MUX8639",
+    "MUX8641", "MUX8643", "MUX8644", "MUX8645", "MUX8649",
+    "MUX8722", "MUX8723", "MUX8724", "MUX8725", "MUX8726",
+    "MUX8727", "MUX8728", "MUX8729", "MUX8730", "MUX8732",
+    "MUX9064", "MUX9065", "MUX9066", "MUX9067", "MUX9068",
+    "MUX9069", "MUX9070", "MUX9071",
+    "SMC01-N", "SMC01-T", "SMC02-N", "SMC02-T",
+    "SMC04-N", "SMC04-T", "SMC07-N", "SMC07-T",
+    "SMC08-T", "SMC09-T", "SMC11-T", "SMC14-T",
+    "SMC15-T", "SMC16-T", "SMC18-T", "SMC19-T",
+    "SMC20-T", "SMC21-T", "SMC23-T", "SMC25-T",
+    "T_cac1", "T_cac10", "T_cac11", "T_cac14",
+    "T_cac16", "T_cac2", "T_cac3", "T_cac4",
+    "T_cac6", "T_cac8", "T_cac9",
+    "XHC084", "XHC085", "XHC087", "XHC088", "XHC089",
+    "XHC090"
+))
+
+cluster_metadata <- seu.filtered@meta.data %>% 
+    dplyr::select(sample,Sidedness,EGFR_efficacy,dataset,condition,Sex,MSS.MSI,Tissue.Site) %>% 
+    unique() 
+
+rownames(cluster_metadata) <- gsub("_|-", ".", cluster_metadata$sample)
+
+#countdata
+cts <- AggregateExpression(seu.filtered,
+                    group.by = c("sample"),
+                    assays = 'RNA',
+                    slot = "counts",
+                    return.seurat = F)
+
+cts <- cts$RNA
+cts <- cts %>% data.frame() %>% dplyr::select(all_of(rownames(cluster_metadata)))
+
+# 23231 genes x 116 sample
+cts %>% dim()
+
+colnames(cts)
+
+# Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(cts,
+                              colData = cluster_metadata,
+                              design = ~ 1)
+
+# rlog() may take a long time with 50 or more samples,
+# vst() is a much faster transformation
+# blind:TRUE : ignore design
+vsdata <- vst(dds, blind=TRUE)
+
+# PCA
+plotPCA(vsdata, intgroup="Sidedness")
+plotPCA(vsdata, intgroup="dataset")
+
+# Remove batch effect using ComBat-Seq
+cts <- as.matrix(cts) 
+adjusted <- ComBat_seq(cts,batch=cluster_metadata$dataset)
+
+# Create DESeq2 object
+dds2 <- DESeqDataSetFromMatrix(adjusted,
+                              colData = cluster_metadata,
+                              design = ~ 1)
+
+# rlog() may take a long time with 50 or more samples,
+# vst() is a much faster transformation
+# blind:TRUE : ignore design
+vsdata2 <- vst(dds2, blind=TRUE)
+
+# PCA
+plotPCA(vsdata2, intgroup="Sidedness")
+
+plotPCA(vsdata2, intgroup="dataset")+
+  theme(
+    legend.position = "bottom"
+  ) #Fig2F-1
+
+rv <- rowVars(assay(vsdata2))
+select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+
+vsdata2$condition_sidedness <- ifelse(vsdata2$condition == "Normal", "Normal",
+                                      paste(vsdata2$condition, vsdata2$Sidedness, sep="_"))
+
+plotPCA(vsdata2, intgroup="condition_sidedness")+
+  theme(
+    legend.position = "bottom"
+  )
+
+autoplot(prcomp(t(assay(vsdata2)[select,])), 
+     data=vsdata2@colData ,
+     colour="condition_sidedness",
+     frame=TRUE, 
+     frame.type ='norm') +
+  theme(
+    legend.position = "bottom"
+  ) #Fig2F-2
+
+
+plotPCA(vsdata2, intgroup="EGFR_efficacy")
+
+rv <- rowVars(assay(vsdata2))
+select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+
+vsdata2$condition_EGFR_efficacy <- ifelse(vsdata2$condition == "Normal", "Normal",
+                                      paste(vsdata2$condition, vsdata2$EGFR_efficacy, sep="_"))
+
+plotPCA(vsdata2, intgroup="condition_EGFR_efficacy")
+
+autoplot(prcomp(t(assay(vsdata2)[select,])), 
+     data=vsdata2@colData ,
+     colour="condition_EGFR_efficacy",
+     frame=TRUE, 
+     frame.type ='norm')+
+  theme(
+    legend.position = "bottom"
+  ) #Fig2F-3
+```
+
+# CIBERSORTx analysis of TCGA bulk RNA-seq: Fig2G
+## Create signature matrix from scRNA-seq data
+```{r}
+sc <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+sc <- subset(sc, condition=="Tumor")
+
+# Downsample
+Idents(sc) <- "cell_type"
+sc.small <- subset(sc,downsample=2000)
+
+sc.small <- subset(sc.small, subset = cell_type %in% c(
+  "B cell", "Endothelial cell", "Epithelial cell", "Myeloid cell", "Plasma cell", "T cell", "Fibroblast"))
+
+table(sc.small@meta.data[["cell_type"]])
+
+# Get count matrix (raw counts)
+sc.small.count <- GetAssayData(object = sc.small, assay = "RNA", layer = "counts")
+
+# Set column names to cell types for CIBERSORTx format
+celltype <- sc.small@meta.data %>% dplyr::select(cell_type) %>% pull(1)
+colnames(sc.small.count) <- celltype
+
+write.table( as.matrix(sc.small.count), file="~/Primarytumor/signature_matrix2000.tsv", sep="\t" , col.names=NA , row.names=T , quote=F)
+```
+
+## Process clinical information for TCGA bulk RNA-seq samples
+```{r}
+COAD <- readRDS("~/Primarytumor/TCGACOAD_rnaseq.RDS")
+READ <- readRDS("~/Primarytumor/TCGAREAD_rnaseq.RDS")
+
+COAD_clinical_info <-  COAD@colData
+READ_clinical_info <-  READ@colData
+merge_clinical_info <- rbind(COAD_clinical_info,READ_clinical_info)
+merge_clinical_info <- merge_clinical_info %>% 
+	data.frame() %>% 
+	rownames_to_column("sampleid") %>% 
+	mutate(sampleid = gsub("-",".",sampleid)) %>%
+       	column_to_rownames("sampleid")
+
+TCGA_COAD_maf <- readRDS("~/Primarytumor/TCGA_COAD_maf.RDS")
+TCGA_READ_maf <- readRDS("~/Primarytumor/TCGA_READ_maf.RDS")
+
+
+KRAS_mut_COAD <- TCGA_COAD_maf %>% 
+  filter(Hugo_Symbol %in%  c("KRAS")) %>% 
+  dplyr::select(Hugo_Symbol,Chromosome,Start_Position,Variant_Classification,Variant_Type,Reference_Allele,Mutation_Status,HGVSp_Short,IMPACT,case_id, Tumor_Sample_Barcode) %>% 
+  data.frame()
+
+KRAS_mut_READ <- TCGA_READ_maf %>%   filter(Hugo_Symbol %in%  c("KRAS")) %>% 
+  dplyr::select(Hugo_Symbol,Chromosome,Start_Position,Variant_Classification,Variant_Type,Reference_Allele,Mutation_Status,HGVSp_Short,IMPACT,case_id, Tumor_Sample_Barcode) %>% 
+  data.frame()
+
+combined_KRAS <- rbind(KRAS_mut_READ, KRAS_mut_COAD)
+
+combined_KRAS$KRAS_mutation <- "mut"
+names(combined_KRAS)[names(combined_KRAS) == "Tumor_Sample_Barcode"] <- "barcode"
+combined_KRAS <- combined_KRAS %>%
+  dplyr::select(c(barcode, KRAS_mutation))
+
+combined_KRAS$barcode <- sapply(strsplit(combined_KRAS$barcode, "-"), function(x) paste(x[1:4], collapse = "-"))
+
+merge_clinical_info$barcode <- sapply(strsplit(merge_clinical_info$barcode, "-"), function(x) paste(x[1:4], collapse = "-"))
+
+merge_clinical_info <- merge(merge_clinical_info, combined_KRAS, by = "barcode", all.x = TRUE)
+
+merge_clinical_info$KRAS_mutation[is.na(merge_clinical_info$KRAS_mutation)] <- "wt"
+
+#BRAFmut検索
+BRAF_mut_COAD <- TCGA_COAD_maf %>% 
+  filter(Hugo_Symbol %in%  c("BRAF")) %>% 
+  dplyr::select(Hugo_Symbol,Chromosome,Start_Position,Variant_Classification,Variant_Type,Reference_Allele,Mutation_Status,HGVSp_Short,IMPACT,case_id, Tumor_Sample_Barcode) %>% 
+  data.frame()
+
+BRAF_mut_COAD <- filtered_data <- BRAF_mut_COAD[BRAF_mut_COAD$HGVSp_Short == "p.V640E", ]
+
+BRAF_mut_READ <- TCGA_READ_maf %>% 
+  filter(Hugo_Symbol %in%  c("BRAF")) %>% 
+  dplyr::select(Hugo_Symbol,Chromosome,Start_Position,Variant_Classification,Variant_Type,Reference_Allele,Mutation_Status,HGVSp_Short,IMPACT,case_id, Tumor_Sample_Barcode) %>% 
+  data.frame()
+
+BRAF_mut_READ <- filtered_data <- BRAF_mut_READ[BRAF_mut_READ$HGVSp_Short == "p.V640E", ]
+
+combined_BRAF <- rbind(BRAF_mut_READ, BRAF_mut_COAD)
+
+combined_BRAF$BRAF_mutation <- "mut"
+names(combined_BRAF)[names(combined_BRAF) == "Tumor_Sample_Barcode"] <- "barcode"
+combined_BRAF <- combined_BRAF %>%
+  dplyr::select(c(barcode, BRAF_mutation))
+
+combined_BRAF$barcode <- sapply(strsplit(combined_BRAF$barcode, "-"), function(x) paste(x[1:4], collapse = "-"))
+
+merge_clinical_info$barcode <- sapply(strsplit(merge_clinical_info$barcode, "-"), function(x) paste(x[1:4], collapse = "-"))
+
+merge_clinical_info <- merge(merge_clinical_info, combined_BRAF, by = "barcode", all.x = TRUE)
+
+merge_clinical_info$BRAF_mutation[is.na(merge_clinical_info$BRAF_mutation)] <- "wt"
+
+#total samples
+nrow(merge_clinical_info)
+#723
+
+merge_clinical_info <- merge_clinical_info %>%
+  filter(BRAF_mutation %in% c("wt"))
+nrow(merge_clinical_info)
+#666
+
+merge_clinical_info <- merge_clinical_info %>% filter(sample_type == "Primary Tumor")
+nrow(merge_clinical_info)
+#612
+
+merge_clinical_info <- merge_clinical_info %>%
+  mutate(sidedness = case_when(
+    tissue_or_organ_of_origin %in% c("Ascending colon", "Cecum", "Hepatic flexure of colon", "Transverse colon") |
+      paper_tumor_site %in% c("1 - right colon", "2 - transverse colon") ~ "Right",
+    
+    tissue_or_organ_of_origin %in% c("Rectosigmoid junction", "Descending colon", "Sigmoid colon", "Splenic flexure of colon", "Rectum, NOS") |
+      paper_tumor_site %in% c("3 - left colon", "4 - rectum")|
+      site_of_resection_or_biopsy %in% c("Cecum")~ "Left",
+    
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(sidedness = replace_na(sidedness, "X"))
+
+merge_clinical_info <- merge_clinical_info %>%
+  filter(!(sidedness %in% c("X")))
+
+merge_clinical_info_eligible <- merge_clinical_info %>%
+  filter(sidedness %in% c("Left")) %>%
+  filter(KRAS_mutation %in% c("wt"))
+nrow(merge_clinical_info_eligible)
+#226
+
+merge_clinical_info_ineligible <- anti_join(merge_clinical_info, merge_clinical_info_eligible)
+nrow(merge_clinical_info_ineligible)
+#347
+
+# color palette 25
+c25 <- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "#FDBF6F", # lt orange
+  "gray70", "khaki2",
+  "maroon", "orchid1", "deeppink1", "blue1", "steelblue4",
+  "darkturquoise", "green1", "yellow4", "yellow3",
+  "darkorange4", "brown"
+)
+
+anno_ineligible <- merge_clinical_info_ineligible  %>% dplyr::select(project_id,`BRAF_mutation`, `KRAS_mutation`, `barcode`) %>%
+  filter(!duplicated(`barcode`)) %>%
+  column_to_rownames(var = "barcode")
+#224
+
+anno_eligible <- merge_clinical_info_eligible  %>% dplyr::select(project_id,`BRAF_mutation`, `KRAS_mutation`, `barcode`)%>%
+    filter(!duplicated(`barcode`)) %>%
+  column_to_rownames(var = "barcode")
+#323
+
+```
+
+## Analyze differences in TME proportions from CIBERSORTx results based on EGFR efficacy
+```{r}
+cibersortx_output <- read.table("~/Primarytumor/TME/CIBERSORTx_Adjusted_TME.txt",sep="\t",header=T)
+
+cibersortx_output$Mixture <- sapply(strsplit(cibersortx_output$Mixture, "\\."), function(x) {
+  paste(x[1:4], collapse = "-")
+})
+
+cibersortx_output <- cibersortx_output %>%
+  filter(!duplicated(Mixture))
+
+anno_rownames_ineligible <- rownames(anno_ineligible)
+anno_rownames_eligible <- rownames(anno_eligible)
+
+cibersortx_output_ineligible <- cibersortx_output %>%
+  filter(Mixture %in% anno_rownames_ineligible)
+
+cibersortx_output_eligible <- cibersortx_output %>%
+  filter(Mixture %in% anno_rownames_eligible)
+
+#ineligible
+cibersortx_output_ineligible <- cibersortx_output_ineligible %>%
+  dplyr::select( -Epithelial.cell)
+
+tmp_ineligible <- cibersortx_output_ineligible %>%
+  dplyr::select(-P.value,-Correlation,-RMSE) %>% column_to_rownames("Mixture") %>% t()
+
+#eligible
+cibersortx_output_eligible <- cibersortx_output_eligible %>%
+  dplyr::select(-Epithelial.cell)
+
+tmp_eligible <- cibersortx_output_eligible %>%
+  dplyr::select(-P.value,-Correlation,-RMSE) %>% column_to_rownames("Mixture") %>% t()
+
+tmp_ineligible_df <- as.data.frame(tmp_ineligible)
+tmp_ineligible_df$Cell_Type <- rownames(tmp_ineligible_df)
+tmp_ineligible_long <- tmp_ineligible_df %>%
+  pivot_longer(
+    cols = -Cell_Type, 
+    names_to = "Sample", 
+    values_to = "Proportion" 
+  )
+
+tmp_ineligible_long <- tmp_ineligible_long %>%
+  group_by(Sample) %>%
+  mutate(
+    Proportion = Proportion / sum(Proportion)  
+  )
+
+cell_order <- c("T.cell","B.cell","Plasma.cell","Myeloid.cell","Endothelial.cell","Fibroblast")
+
+tmp_ineligible_long$Cell_Type <- factor(tmp_ineligible_long$Cell_Type, levels = cell_order)
+
+tmp_eligible_df <- as.data.frame(tmp_eligible)
+tmp_eligible_df$Cell_Type <- rownames(tmp_eligible_df)
+tmp_eligible_long <- tmp_eligible_df %>%
+  pivot_longer(
+    cols = -Cell_Type, 
+    names_to = "Sample", 
+    values_to = "Proportion"  
+  )
+
+tmp_eligible_long <- tmp_eligible_long %>%
+  group_by(Sample) %>%
+  mutate(
+    Proportion = Proportion / sum(Proportion)  
+  )
+
+tmp_eligible_long$Cell_Type <- factor(tmp_eligible_long$Cell_Type, levels = cell_order)
+
+tmp_eligible_long$Group <- "Eligible"
+tmp_ineligible_long$Group <- "Ineligible"
+
+combined_df <- rbind(tmp_eligible_long, tmp_ineligible_long)
+combined_df$Group <- factor(combined_df$Group, levels = c("Eligible", "Ineligible"))
+
+ggplot(combined_df, aes(x = Group, y = Proportion)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightgray", alpha = 0.4) + 
+  geom_jitter(aes(color = Group), width = 0.2, alpha = 0.5, size = 1.5) +  
+  stat_summary(fun = mean, geom = "point", shape = 18, color = "red", size = 3) + 
+  stat_summary(fun = mean, geom = "line", aes(group = 1), color = "red", size = 1.2) +  
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    label.y.npc = "top"
+  ) +
+  facet_wrap(~ Cell_Type, scales = "free_y") #Fig2G
+```
+
+## Pseudobulk PCA for other cell types (Fibroblast, T cell, Myeloid)
+### Fibroblast: suppleFigC-1,2 
+```{r}
+obj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+obj <- subset(obj, cell_type=="Fibroblast")
+
+plot <- DimPlot(obj, group.by="cell_type",label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+seu.filtered <- subset(obj, cells = select1)
+
+cell_counts <- table(seu.filtered@meta.data$sample)
+
+samples <- names(cell_counts[cell_counts > 50])
+samples
+
+selected_samples <- c(
+    "CRC-JSC-S04-GIS-T-US-1", "CRC-JSC-S04-GIS-T-US-2",
+    "CRC-JSC-S06-GIS-T-US-1", "CRC-JSC-S06-GIS-T-US-2",
+    "CRC-JSC-S07-GIS-T-US-1", "CRC-JSC-S07-GIS-T-US-2",
+    "CRC-JSC-S08-GIS-T-US-1", "CRC-JSC-S08-GIS-T-US-2",
+    "CRC-JSC-S12-GIS-T-US-1", "CRC-JSC-S12-GIS-T-US-2",
+    "CRC-JSC-S13-GIS-T-US-1", "CRC-JSC-S15-GIS-N-US-1",
+    "CRC-JSC-S15-GIS-N-US-2",
+    "EXT009", "EXT010", "EXT011", "EXT012", "EXT013",
+    "EXT014", "EXT015", "EXT016", "EXT017", "EXT019",
+    "EXT020", "EXT023", "EXT027", "EXT028", "EXT029",
+    "EXT032", "EXT093", "EXT094", "EXT095", "EXT099",
+    "EXT121", "EXT122", "EXT123",
+    "MUX8563", "MUX8564", "MUX8565", "MUX8566", "MUX8567",
+    "MUX8568", "MUX8569", "MUX8570", "MUX8571", "MUX8572",
+    "MUX8579", "MUX8580", "MUX8581", "MUX8582", "MUX8584",
+    "MUX8631", "MUX8633", "MUX8639",
+    "MUX8641", "MUX8643", "MUX8644", "MUX8645", "MUX8649",
+    "MUX8722", "MUX8723", "MUX8724", "MUX8725", "MUX8726",
+    "MUX8727", "MUX8728", "MUX8729", "MUX8730", "MUX8732",
+    "MUX9064", "MUX9065", "MUX9066", "MUX9067", "MUX9068",
+    "MUX9069", "MUX9070", "MUX9071",
+    "SMC01-N", "SMC01-T", "SMC02-N",
+    "SMC04-N", "SMC05-N", "SMC07-N",
+    "SMC08-N", "SMC08-T", "SMC09-N",
+    "SMC14-T", "SMC15-T", "SMC20-T",
+    "T_cac1", "T_cac2", "T_cac3",
+    "XHC084", "XHC085", "XHC087",
+    "XHC088", "XHC089", "XHC090", "XHC091"
+)
+
+seu.filtered <- subset(seu.filtered, sample %in% selected_samples)
+
+cluster_metadata <- seu.filtered@meta.data %>% 
+    dplyr::select(sample,Sidedness,EGFR_efficacy,dataset,condition,Sex,MSS.MSI,Tissue.Site) %>% 
+    unique() 
+
+rownames(cluster_metadata) <- gsub("_|-", ".", cluster_metadata$sample)
+
+#countdata
+cts <- AggregateExpression(seu.filtered,
+                    group.by = c("sample"),
+                    assays = 'RNA',
+                    slot = "counts",
+                    return.seurat = F)
+
+cts <- cts$RNA
+cts <- cts %>% data.frame() %>% dplyr::select(all_of(rownames(cluster_metadata)))
+
+# 23231 genes x 99 sample
+cts %>% dim()
+
+colnames(cts)
+
+# Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(cts,
+                              colData = cluster_metadata,
+                              design = ~ 1)
+
+# rlog() may take a long time with 50 or more samples,
+# vst() is a much faster transformation
+# blind:TRUE : ignore design
+vsdata <- vst(dds, blind=TRUE)
+
+# PCA
+plotPCA(vsdata, intgroup="Sidedness")
+plotPCA(vsdata, intgroup="dataset")
+
+cts <- as.matrix(cts) 
+adjusted <- ComBat_seq(cts,batch=cluster_metadata$dataset)
+
+dds2 <- DESeqDataSetFromMatrix(adjusted,
+                              colData = cluster_metadata,
+                              design = ~ 1)
+
+# rlog() may take a long time with 50 or more samples,
+# vst() is a much faster transformation
+# blind:TRUE : ignore design
+vsdata2 <- vst(dds2, blind=TRUE)
+
+# PCA
+plotPCA(vsdata2, intgroup="Sidedness")
+
+rv <- rowVars(assay(vsdata2))
+select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+
+vsdata2$condition_sidedness <- ifelse(vsdata2$condition == "Normal", "Normal",
+                                      paste(vsdata2$condition, vsdata2$Sidedness, sep="_"))
+
+plotPCA(vsdata2, intgroup="condition_sidedness")
+
+autoplot(prcomp(t(assay(vsdata2)[select,])), 
+     data=vsdata2@colData ,
+     colour="condition_sidedness",
+     frame=TRUE, 
+     frame.type ='norm') 
+
+plotPCA(vsdata2, intgroup="EGFR_efficacy")
+
+rv <- rowVars(assay(vsdata2))
+select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+
+vsdata2$condition_EGFR_efficacy <- ifelse(vsdata2$condition == "Normal", "Normal",
+                                      paste(vsdata2$condition, vsdata2$EGFR_efficacy, sep="_"))
+
+plotPCA(vsdata2, intgroup="condition_EGFR_efficacy")
+
+autoplot(prcomp(t(assay(vsdata2)[select,])), 
+     data=vsdata2@colData ,
+     colour="condition_EGFR_efficacy",
+     frame=TRUE, 
+     frame.type ='norm')+
+  theme(
+    legend.position = "bottom"
+  ) #SFig2C-1
+
+plotPCA(vsdata2, intgroup="dataset")+
+  theme(
+    legend.position = "bottom"
+  ) #SFig2C-2
+```
+
+### T cell: suppleFigC-3,4
+```{r}
+obj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+obj <- subset(obj, cell_type=="T cell")
+
+plot <- DimPlot(obj, group.by="cell_type",label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+seu.filtered <- subset(obj, cells = select1)
+
+cell_counts <- table(seu.filtered@meta.data$sample)
+
+samples <- names(cell_counts[cell_counts > 100])
+samples
+
+seu.filtered <- subset(seu.filtered, sample %in% c(
+    "B_cac10", "B_cac11", "B_cac14", "B_cac4", "B_cac6",
+    "CRC-JSC-S04-GIS-T-US-1", "CRC-JSC-S04-GIS-T-US-2", "CRC-JSC-S06-GIS-T-US-1", 
+    "CRC-JSC-S06-GIS-T-US-2", "CRC-JSC-S07-GIS-T-US-1", "CRC-JSC-S07-GIS-T-US-2",
+    "CRC-JSC-S08-GIS-T-US-1", "CRC-JSC-S08-GIS-T-US-2", "CRC-JSC-S12-GIS-T-US-1", 
+    "CRC-JSC-S12-GIS-T-US-2", "CRC-JSC-S13-GIS-T-US-1", "CRC-JSC-S13-GIS-T-US-2", 
+    "CRC-JSC-S14-GIS-T-US-1", "CRC-JSC-S14-GIS-T-US-2", 
+    "CRC-JSC-S15-GIS-N-US-1", "CRC-JSC-S15-GIS-N-US-2", "CRC-JSC-S15-GIS-T-US-2",
+    "EXT009", "EXT010", "EXT011", "EXT012", "EXT013", "EXT014", "EXT015",
+    "EXT016", "EXT017", "EXT018", "EXT019",
+    "EXT031", "EXT032", "EXT093", "EXT094", "EXT095", "EXT097", "EXT098", "EXT099",
+    "EXT121", "EXT122", "EXT123",
+    "MUX8563", "MUX8564", "MUX8565", "MUX8566", "MUX8567", "MUX8568",
+    "MUX8569", "MUX8570", "MUX8571", "MUX8572", "MUX8579",
+    "MUX8580", "MUX8581", "MUX8582", "MUX8584",
+    "MUX8631", "MUX8633", "MUX8639", "MUX8641", "MUX8643", "MUX8644",
+    "MUX8645", "MUX8647", "MUX8648", "MUX8649",
+    "MUX8722", "MUX8723", "MUX8724", "MUX8725", "MUX8726", "MUX8727",
+    "MUX8728", "MUX8729", "MUX8730", "MUX8732",
+    "MUX9064", "MUX9065", "MUX9066", "MUX9067", "MUX9068", "MUX9069",
+    "MUX9070", "MUX9071",
+    "SMC01-N", "SMC01-T", "SMC02-N", "SMC02-T", "SMC04-N", "SMC04-T",
+    "SMC05-N", "SMC05-T", "SMC07-N", "SMC07-T", "SMC08-N", "SMC08-T",
+    "SMC09-N", "SMC09-T", "SMC11-T", "SMC14-T", "SMC15-T", "SMC16-T",
+    "SMC18-T", "SMC19-T", "SMC20-T", "SMC21-T", "SMC23-T", "SMC25-T",
+    "T_cac10", "T_cac11", "T_cac13", "T_cac14", "T_cac16", "T_cac4",
+    "T_cac5", "T_cac6", "T_cac8", "T_cac9",
+    "XHC084", "XHC085", "XHC087", "XHC088", "XHC089", "XHC090", "XHC091"
+))
+
+#metadata
+cluster_metadata <- seu.filtered@meta.data %>% 
+    dplyr::select(sample,Sidedness,EGFR_efficacy,dataset,condition,Sex,MSS.MSI,Tissue.Site) %>% 
+    unique() 
+
+rownames(cluster_metadata) <- gsub("_|-", ".", cluster_metadata$sample)
+
+#countdata
+cts <- AggregateExpression(seu.filtered,
+                    group.by = c("sample"),
+                    assays = 'RNA',
+                    slot = "counts",
+                    return.seurat = F)
+
+cts <- cts$RNA
+cts <- cts %>% data.frame() %>% dplyr::select(all_of(rownames(cluster_metadata)))
+
+# 23231 genes x 128 sample
+cts %>% dim()
+
+colnames(cts)
+
+# Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(cts,
+                              colData = cluster_metadata,
+                              design = ~ 1)
+
+# rlog() may take a long time with 50 or more samples,
+# vst() is a much faster transformation
+# blind:TRUE : ignore design
+vsdata <- vst(dds, blind=TRUE)
+
+plotPCA(vsdata, intgroup="dataset")
+
+cts <- as.matrix(cts) 
+
+dds2 <- DESeqDataSetFromMatrix(adjusted,
+                              colData = cluster_metadata,
+                              design = ~ 1)
+
+# rlog() may take a long time with 50 or more samples,
+# vst() is a much faster transformation
+# blind:TRUE : ignore design
+vsdata2 <- vst(dds2, blind=TRUE)
+
+vsdata_mat <- assay(vsdata2)
+
+# batch effect removal: limma
+vsdata_final <- removeBatchEffect(vsdata_mat, batch=cluster_metadata$dataset)
+
+metadata <- as.data.frame(colData(vsdata2))
+
+metadata$condition_sidedness <- ifelse(metadata$condition == "Normal", "Normal",
+                                       paste(metadata$condition, metadata$Sidedness, sep="_"))
+
+metadata$condition_EGFR_efficacy <- ifelse(metadata$condition == "Normal", "Normal",
+                                           paste(metadata$condition, metadata$EGFR_efficacy, sep="_"))
+
+rv <- rowVars(vsdata_final)
+select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+
+pca_res <- prcomp(t(vsdata_final[select,]))
+
+autoplot(pca_res, 
+               data = metadata,
+               colour = "condition_sidedness",
+               frame = TRUE, 
+               frame.type = 'norm') +
+      theme(legend.position = "bottom") 
+
+autoplot(pca_res, 
+               data = metadata,
+               colour = "condition_EGFR_efficacy",
+               frame = TRUE, 
+               frame.type = 'norm') +
+      theme(legend.position = "bottom") #SFig2C-3
+
+autoplot(pca_res, 
+               data = metadata,
+               colour = "dataset") +
+      theme(legend.position = "bottom") #SFig2C-4
+```
+
+### myeloid cell: suppleFigC-5,6
+```{r}
+obj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+obj <- subset(obj, cell_type=="Myeloid cell")
+
+plot <- DimPlot(obj, group.by="cell_type",label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+seu.filtered <- subset(obj, cells = select1)
+
+cell_counts <- table(seu.filtered@meta.data$sample)
+
+samples <- names(cell_counts[cell_counts > 50])
+samples
+
+seu.filtered <- subset(seu.filtered, sample %in% c(
+    "CRC-JSC-S04-GIS-T-US-1", "CRC-JSC-S04-GIS-T-US-2", 
+    "CRC-JSC-S06-GIS-T-US-1", "CRC-JSC-S06-GIS-T-US-2", 
+    "CRC-JSC-S07-GIS-T-US-1", "CRC-JSC-S12-GIS-T-US-1", 
+    "CRC-JSC-S12-GIS-T-US-2", "CRC-JSC-S13-GIS-T-US-1", 
+    "CRC-JSC-S13-GIS-T-US-2", "CRC-JSC-S14-GIS-T-US-1", 
+    "CRC-JSC-S14-GIS-T-US-2", "CRC-JSC-S15-GIS-T-US-1",
+    "CRC-JSC-S15-GIS-T-US-2", "CRC-JSC-S15-GIS-TS-US-1",
+    "EXT009", "EXT010", "EXT011", "EXT012", "EXT013", "EXT015",
+    "EXT016", "EXT017", "EXT094", "EXT095",
+    "EXT097", "EXT098", "EXT099",
+    "EXT121", "EXT122",
+    "MUX8563", "MUX8564", "MUX8565", "MUX8566",
+    "MUX8568", "MUX8569", "MUX8570", "MUX8571", "MUX8572",
+    "MUX8580", "MUX8581", "MUX8582", "MUX8584",
+    "MUX8631", "MUX8633", "MUX8639", "MUX8641",
+    "MUX8643", "MUX8645", "MUX8649",
+    "MUX8722", "MUX8723", "MUX8724", "MUX8725", "MUX8726", "MUX8727",
+    "MUX8728", "MUX8729", "MUX8730", "MUX8732",
+    "MUX9064", "MUX9065", "MUX9066", "MUX9067", "MUX9068", "MUX9069",
+    "MUX9070", "MUX9071",
+    "SMC01-T", "SMC02-T", "SMC04-T", "SMC07-T", "SMC08-T", "SMC09-T",
+    "SMC14-T", "SMC15-T", "SMC20-T", "SMC23-T",
+    "T_cac16", "T_cac6", "T_cac9",
+    "XHC084", "XHC085", "XHC087", "XHC088", "XHC089", "XHC090", "XHC091"
+))
+
+#metadata
+cluster_metadata <- seu.filtered@meta.data %>% 
+    dplyr::select(sample,Sidedness,EGFR_efficacy,dataset,condition,Sex,MSS.MSI,Tissue.Site) %>% 
+    unique() 
+
+rownames(cluster_metadata) <- gsub("_|-", ".", cluster_metadata$sample)
+
+
+#countdata
+cts <- AggregateExpression(seu.filtered,
+                    group.by = c("sample"),
+                    assays = 'RNA',
+                    slot = "counts",
+                    return.seurat = F)
+
+cts <- cts$RNA
+cts <- cts %>% data.frame() %>% dplyr::select(all_of(rownames(cluster_metadata)))
+
+# 23231 genes x 87 sample
+cts %>% dim()
+
+colnames(cts)
+
+# Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(cts,
+                              colData = cluster_metadata,
+                              design = ~ 1)
+
+# rlog() may take a long time with 50 or more samples,
+# vst() is a much faster transformation
+# blind:TRUE : ignore design
+vsdata <- vst(dds, blind=TRUE)
+
+# PCA
+plotPCA(vsdata, intgroup="Sidedness")
+plotPCA(vsdata, intgroup="dataset")
+
+cts <- as.matrix(cts) 
+adjusted <- ComBat_seq(cts,batch=cluster_metadata$dataset)
+
+# Create DESeq2 object
+dds2 <- DESeqDataSetFromMatrix(adjusted,
+                              colData = cluster_metadata,
+                              design = ~ 1)
+
+# rlog() may take a long time with 50 or more samples,
+# vst() is a much faster transformation
+# blind:TRUE : ignore design
+vsdata2 <- vst(dds2, blind=TRUE)
+
+# PCA
+plotPCA(vsdata2, intgroup="Sidedness")
+rv <- rowVars(assay(vsdata2))
+select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+
+vsdata2$condition_sidedness <- ifelse(vsdata2$condition == "Normal", "Normal",
+                                      paste(vsdata2$condition, vsdata2$Sidedness, sep="_"))
+
+plotPCA(vsdata2, intgroup="condition_sidedness")
+
+autoplot(prcomp(t(assay(vsdata2)[select,])), 
+     data=vsdata2@colData ,
+     colour="condition_sidedness",
+     frame=TRUE, 
+     frame.type ='norm') 
+
+plotPCA(vsdata2, intgroup="EGFR_efficacy")
+
+rv <- rowVars(assay(vsdata2))
+select <- order(rv, decreasing = TRUE)[seq_len(min(500, length(rv)))]
+
+vsdata2$condition_EGFR_efficacy <- ifelse(vsdata2$condition == "Normal", "Normal",
+                                      paste(vsdata2$condition, vsdata2$EGFR_efficacy, sep="_"))
+
+plotPCA(vsdata2, intgroup="condition_EGFR_efficacy")
+
+autoplot(prcomp(t(assay(vsdata2)[select,])), 
+     data=vsdata2@colData ,
+     colour="condition_EGFR_efficacy",
+     frame=TRUE, 
+     frame.type ='norm')+
+  theme(
+    legend.position = "bottom"
+  ) #Fig2G-5
+
+plotPCA(vsdata2, intgroup="dataset")+
+  theme(
+    legend.position = "bottom"
+  ) #Fig2G-6
+```
+
+# Session Information
+
+```{r echo=FALSE}
+sessionInfo()
+#R version 4.4.0 (2024-04-24 ucrt)
+#Platform: x86_64-w64-mingw32/x64
+#Running under: Windows 11 x64 (build 26100)
+
+#Matrix products: default
+
+
+#locale:
+#[1] LC_COLLATE=Japanese_Japan.utf8  LC_CTYPE=Japanese_Japan.utf8   
+#[3] LC_MONETARY=Japanese_Japan.utf8 LC_NUMERIC=C                   
+#[5] LC_TIME=Japanese_Japan.utf8    
+
+#time zone: Asia/Tokyo
+#tzcode source: internal
+
+#attached base packages:
+#[1] stats4    stats     graphics  grDevices utils     datasets  methods  
+#[8] base     
+
+#other attached packages:
+# [1] ggrepel_0.9.6               patchwork_1.3.0            
+# [3] viridis_0.6.5               viridisLite_0.4.2          
+# [5] ggpubr_0.6.0                ggfortify_0.4.17           
+# [7] sva_3.54.0                  BiocParallel_1.40.0        
+# [9] genefilter_1.88.0           mgcv_1.9-1                 
+#[11] nlme_3.1-168                DESeq2_1.46.0              
+#[13] SummarizedExperiment_1.36.0 Biobase_2.64.0             
+#[15] MatrixGenerics_1.18.1       matrixStats_1.5.0          
+#[17] GenomicRanges_1.56.1        GenomeInfoDb_1.42.3        
+#[19] IRanges_2.38.1              S4Vectors_0.42.1           
+#[21] BiocGenerics_0.52.0         infercnv_1.22.0            
+#[23] lubridate_1.9.4             forcats_1.0.0              
+#[25] stringr_1.5.1               dplyr_1.1.4                
+#[27] purrr_1.0.4                 readr_2.1.5                
+#[29] tidyr_1.3.1                 tibble_3.2.1               
+#[31] ggplot2_3.5.1               tidyverse_2.0.0            
+#[33] Seurat_5.2.1                SeuratObject_5.0.2         
+#[35] sp_2.2-0                    kableExtra_1.4.0           
+
+#loaded via a namespace (and not attached):
+#  [1] spatstat.sparse_3.1-0       bitops_1.0-9               
+#  [3] httr_1.4.7                  RColorBrewer_1.1-3         
+#  [5] doParallel_1.0.17           backports_1.5.0            
+#  [7] tools_4.4.0                 sctransform_0.4.1          
+#  [9] R6_2.6.1                    lazyeval_0.2.2             
+# [11] uwot_0.2.3                  withr_3.0.2                
+# [13] gridExtra_2.3               parallelDist_0.2.6         
+# [15] progressr_0.15.1            argparse_2.2.5             
+# [17] cli_3.6.3                   formatR_1.14               
+# [19] spatstat.explore_3.4-2      fastDummies_1.7.5          
+# [21] sandwich_3.1-1              mvtnorm_1.3-3              
+# [23] spatstat.data_3.1-6         ggridges_0.5.6             
+# [25] pbapply_1.7-2               systemfonts_1.2.2          
+# [27] svglite_2.1.3               parallelly_1.43.0          
+# [29] limma_3.62.2                rstudioapi_0.17.1          
+# [31] RSQLite_2.3.9               generics_0.1.3             
+# [33] gtools_3.9.5                ica_1.0-3                  
+# [35] spatstat.random_3.3-3       car_3.1-3                  
+# [37] Matrix_1.7-2                futile.logger_1.4.3        
+# [39] abind_1.4-8                 lifecycle_1.0.4            
+# [41] multcomp_1.4-28             yaml_2.3.10                
+# [43] edgeR_4.4.2                 carData_3.0-5              
+# [45] gplots_3.2.0                SparseArray_1.6.1          
+# [47] Rtsne_0.17                  grid_4.4.0                 
+# [49] blob_1.2.4                  promises_1.3.2             
+# [51] crayon_1.5.3                miniUI_0.1.1.1             
+# [53] lattice_0.22-6              cowplot_1.1.3              
+# [55] annotate_1.84.0             KEGGREST_1.46.0            
+# [57] pillar_1.10.2               knitr_1.50                 
+# [59] future.apply_1.11.3         codetools_0.2-20           
+# [61] glue_1.8.0                  spatstat.univar_3.1-2      
+# [63] data.table_1.17.0           vctrs_0.6.5                
+# [65] png_0.1-8                   spam_2.11-1                
+# [67] gtable_0.3.6                cachem_1.1.0               
+# [69] xfun_0.52                   S4Arrays_1.4.1             
+# [71] mime_0.13                   libcoin_1.0-10             
+# [73] coda_0.19-4.1               survival_3.8-3             
+# [75] SingleCellExperiment_1.28.1 iterators_1.0.14           
+# [77] statmod_1.5.0               fitdistrplus_1.2-2         
+# [79] TH.data_1.1-3               ROCR_1.0-11                
+# [81] bit64_4.6.0-1               RcppAnnoy_0.0.22           
+# [83] irlba_2.3.5.1               KernSmooth_2.23-26         
+# [85] colorspace_2.1-1            DBI_1.2.3                  
+# [87] tidyselect_1.2.1            bit_4.6.0                  
+# [89] compiler_4.4.0              xml2_1.3.8                 
+# [91] DelayedArray_0.32.0         plotly_4.10.4              
+# [93] scales_1.3.0                caTools_1.18.3             
+# [95] lmtest_0.9-40               digest_0.6.37              
+# [97] goftest_1.2-3               spatstat.utils_3.1-3       
+# [99] rmarkdown_2.29              XVector_0.44.0             
+#[101] htmltools_0.5.8.1           pkgconfig_2.0.3            
+#[103] fastmap_1.2.0               rlang_1.1.5                
+#[105] htmlwidgets_1.6.4           UCSC.utils_1.2.0           
+#[107] shiny_1.10.0                farver_2.1.2               
+#[109] zoo_1.8-13                  jsonlite_1.8.9             
+#[111] magrittr_2.0.3              Formula_1.2-5              
+#[113] modeltools_0.2-23           GenomeInfoDbData_1.2.13    
+#[115] dotCall64_1.2               munsell_0.5.1              
+#[117] Rcpp_1.0.14                 ape_5.8-1                  
+#[119] reticulate_1.42.0           stringi_1.8.7              
+#[121] zlibbioc_1.50.0             MASS_7.3-65                
+#[123] plyr_1.8.9                  parallel_4.4.0             
+#[125] listenv_0.9.1               deldir_2.0-4               
+#[127] Biostrings_2.74.1           splines_4.4.0              
+#[129] tensor_1.5                  hms_1.1.3                  
+#[131] locfit_1.5-9.12             igraph_2.1.4               
+#[133] fastcluster_1.2.6           spatstat.geom_3.3-6        
+#[135] ggsignif_0.6.4              RcppHNSW_0.6.0             
+#[137] reshape2_1.4.4              futile.options_1.0.1       
+#[139] XML_3.99-0.18               evaluate_1.0.3             
+#[141] RcppParallel_5.1.10         lambda.r_1.2.4             
+#[143] tzdb_0.5.0                  phyclust_0.1-34            
+#[145] foreach_1.5.2               httpuv_1.6.15              
+#[147] RANN_2.6.2                  polyclip_1.10-7            
+#[149] future_1.34.0               scattermore_1.2            
+#[151] coin_1.4-3                  broom_1.0.8                
+#[153] xtable_1.8-4                RSpectra_0.16-2            
+#[155] rstatix_0.7.2               later_1.4.2                
+#[157] rjags_4-17                  memoise_2.0.1              
+#[159] AnnotationDbi_1.68.0        cluster_2.1.8.1            
+#[161] timechange_0.3.0            globals_0.16.3  
+
+info <- sessionInfo()
+```
+
+paste("Analysis performed using R version", paste(info$R.version$major, info$R.version$minor, sep="."))
+[1] "Analysis performed using R version 4.4.0"
+
+```{r echo=FALSE}
+pkg.info <- getPkgInfo(info)
+kable(pkg.info, format = "html", row.names=F) %>% kable_styling()
+```
+

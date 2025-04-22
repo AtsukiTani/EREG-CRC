@@ -1,0 +1,704 @@
+---
+title: "Fig3"
+author: "Atsuki Taniguchi"
+date: "`r format(Sys.time(), '%Y年%m月%d日')`"
+output:
+ html_document:
+  toc: true
+  toc_float: true
+  toc_depth: 6 
+  number_sections: true
+---
+```{=html}
+<style>
+div.blue pre { background-color:lightblue !important; }
+div.blue pre.r { background-color:lightyellow !important; }
+</style>
+```
+<div class = "blue">
+
+```{r setup, include=FALSE}
+library(kableExtra)
+
+knitr::opts_chunk$set(cache=FALSE, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.width=10, fig.height=8)
+
+```
+
+```{r}
+# Helper function for package info
+getPkgInfo <- function(info){
+  #info <- sessionInfo()
+  pkg <- info$otherPkgs
+  pkg.info <- t(sapply(pkg, function(p){
+    out <- matrix(c(Package=ifelse(is.null(p$Package),"-",p$Package),
+                    Version=ifelse(is.null(p$Version),"-",p$Version),
+                    Title=ifelse(is.null(p$Title),"-",p$Title),
+                    License=ifelse(is.null(p$License),"-",p$License),
+                    Repository=ifelse(is.null(p$Repository),"-",p$Repository)), nrow=1, ncol=5)
+  }))
+  colnames(pkg.info) <- c("Package","Version","Overview","License","Repository")
+  return(pkg.info)
+}
+```
+
+# Loading packages
+```{r}
+library(Seurat);library(tidyverse);library(CellChat);library(nichenetr) ;library(pheatmap);library(patchwork);library(ggrepel);library(future) 
+```
+
+# EREG Expression Analysis: Fig3A,3B,3C,S3B
+```{r}
+set.seed(123)
+
+obj <- readRDS("~/Primarytumor/tumor_integrated_LR.RDS")
+Idents(obj) <- "RAS"
+
+obj_R <-subset(obj, Sidedness=="R")
+obj_L <-subset(obj, Sidedness=="L")
+
+FeaturePlot(obj_R, features = "EREG", split.by = "RAS") #Fig3A-1
+FeaturePlot(obj_L, features = "EREG", split.by = "RAS") #Fig3A-2
+
+obj@meta.data$Side_RAS <- NA
+
+obj@meta.data$Side_RAS[obj@meta.data$RAS == "wt" & obj@meta.data$Sidedness == "L"] <- "Left_RAS-wild"
+obj@meta.data$Side_RAS[obj@meta.data$RAS == "mut" & obj@meta.data$Sidedness == "L"] <- "Left_RAS-mut"
+obj@meta.data$Side_RAS[obj@meta.data$RAS == "wt" & obj@meta.data$Sidedness == "R"] <- "Right_RAS-wild"
+obj@meta.data$Side_RAS[obj@meta.data$RAS == "mut" & obj@meta.data$Sidedness == "R"] <- "Right_RAS-mut"
+
+DotPlot(obj, features = "EREG", scale = FALSE, group.by = "Side_RAS") #Fig3B
+DotPlot(obj, features = c("AREG","EGF", "TGFA", "BTC", "EPGN", "HBEGF"), scale = FALSE, group.by = "Side_RAS") #Fig3C
+DotPlot(obj, features = "EREG", scale = FALSE, group.by = "seurat_clusters") #SFig3B
+```
+
+#Cell Type Proportions by Condition/Efficacy: Fig3D
+```{r}
+sc <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+
+sc@meta.data$cell_type[Idents(sc) == 11] <- "Pericyte"
+
+sc_F <- subset(sc, cell_type=="Fibroblast")
+sc_CAF <- subset(sc_F, condition=="Tumor")
+CAF <- colnames(sc_CAF) 
+sc$cell_type[CAF] <- "CAF"
+
+sc_Fibro <- subset(sc_F, condition=="Normal")
+Fibro <- colnames(sc_Fibro) 
+sc$cell_type[Fibro] <- "NF"
+
+sc_meta_data <- as.data.frame(sc@meta.data)
+
+data_processed <- sc_meta_data %>%
+  filter(cell_type != "Epithelial cell",
+         cell_type != "not.defined", 
+         !is.na(cell_type)) %>%  
+  mutate(Group = case_when(
+    condition == "Normal" ~ "Normal",
+    condition == "Tumor" & EGFR_efficacy == "EGFR_eligible" ~ "EGFR_eligible",
+    condition == "Tumor" & EGFR_efficacy == "EGFR_ineligible" ~ "EGFR_ineligible"
+  )) %>%
+  filter(!is.na(Group)) %>%
+  dplyr::select(Group, cell_type)
+
+data_processed$cell_type <- factor(data_processed$cell_type, levels = c("NF","CAF","Pericyte", "Myeloid cell","T cell", "B cell","Plasma cell","Endothelial cell"))
+
+data_summary <- data_processed %>%
+  dplyr::count(Group, cell_type) %>%
+  group_by(Group) %>%
+  mutate(Freq = n / sum(n))
+
+custom_dark_colors <- c(
+  "NF"               = "#3366CC",  
+  "CAF"              = "#DC3912",   
+  "Pericyte"         = "#E67300",  
+  "Myeloid cell"      = "#990099",   
+  "T cell"           = "#66AA00",  
+  "B cell"           = "#B82E2E",  
+  "Plasma cell"      = "#316395", 
+  "Endothelial cell" = "#AAAA11"   
+)
+
+ggplot(data_summary, aes(x = Group, y = Freq, fill = cell_type)) +
+  geom_bar(stat="identity", position="stack") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = custom_dark_colors) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_blank(),
+        text = element_text(family = "Arial", size = 10),
+    axis.text = element_text(size = 10)) #Fig3D
+```
+
+# CellChat Analysis: EGFR_ineligible vs EGFR_eligible
+##Create CellChat object for EGFR_ineligible group
+```{r}
+set.seed(123)
+
+sc <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+sc <- subset(sc, condition=="Tumor")
+sc@meta.data$cell_type[Idents(sc) == 11] <- "Pericyte"
+
+sc@meta.data <- sc@meta.data %>%
+  mutate(cell_type = ifelse(cell_type == "Epithelial cell", "Cancer cell", cell_type))
+
+sc <- subset(sc, cell_type %in% c(
+    "B cell", "Endothelial cell", "Cancer cell", 
+    "Fibroblast", "Myeloid cell", "Plasma cell", "T cell"))
+
+sc_ineligible <- subset(sc, EGFR_efficacy=="EGFR_ineligible")
+
+data.input <- sc_ineligible[["RNA"]]$data
+meta <-  sc_ineligible@meta.data %>% dplyr::select(cell_type)
+colnames(meta) <- "labels"
+
+cellChat_ineligible <- createCellChat(object = data.input, meta  = meta, group.by = "labels")
+
+future::plan("multicore", workers = 12)
+options(future.globals.maxSize = 10000 * 1024^2)
+
+# Ligand-receptor interactions in CellChat database for human
+CellChatDB <- CellChatDB.human
+
+# Subset CellChatDB databse by only including interactions of interest
+CellChatDB.use <- subsetDB(CellChatDB)
+
+# set DB
+cellChat_ineligible@DB <- CellChatDB.use
+
+# Subset the expression data of signaling genes for saving computation cost
+# update object@data.signaling
+cellChat_ineligible <- subsetData(cellChat_ineligible)
+
+# Identify over-expressed signaling genes associated with each cell group
+# return object@var.features
+
+cellChat_ineligible <- identifyOverExpressedGenes(cellChat_ineligible)
+
+# Identify over-expressed ligand-receptor interactions (pairs) within the used CellChatDB
+# return object@LR$LRsig
+cellChat_ineligible <- identifyOverExpressedInteractions(cellChat_ineligible)
+
+# To further speed up on large-scale datasets, USER can downsample the data using the function 'subset' from Seurat package (e.g., pbmc.small <- subset(pbmc, downsample = 500)), or using the function 'sketchData' from CellChat, in particular for the large cell clusters;
+# return object@net$prob
+cellChat_ineligible <- computeCommunProb(cellChat_ineligible, type = "triMean")
+
+# Filter cell-cell communication if there are only few number of cells in certain cell groups
+# update object@net
+cellChat_ineligible <- filterCommunication(cellChat_ineligible, min.cells = 10)
+
+# Compute the communication probability on signaling pathway level by summarizing all related ligands/receptors
+# return object@netP
+cellChat_ineligible <- computeCommunProbPathway(cellChat_ineligible)
+
+# Calculate the aggregated network by counting the number of links or summarizing the communication probability
+# return object@net$count, object@net$weight, object@net$sum
+cellChat_ineligible <- aggregateNet(cellChat_ineligible)
+
+saveRDS(cellChat_ineligible,"~/Primarytumor/cellchat_EGFR_ineligible.rds")
+```
+
+##Create CellChat object for EGFR_eligible group
+```{r}
+set.seed(123)
+
+sc_eligible <- subset(sc, EGFR_efficacy=="EGFR_eligible")
+
+data.input <- sc_eligible[["RNA"]]$data
+meta <-  sc_eligible@meta.data %>% dplyr::select(cell_type)
+colnames(meta) <- "labels"
+
+cellChat_eligible <- createCellChat(object = data.input, meta  = meta, group.by = "labels")
+
+future::plan("multicore", workers = 12)
+options(future.globals.maxSize = 10000 * 1024^2)
+
+# Ligand-receptor interactions in CellChat database for human
+CellChatDB <- CellChatDB.human
+
+# Subset CellChatDB databse by only including interactions of interest
+CellChatDB.use <- subsetDB(CellChatDB)
+
+# set DB
+cellChat_eligible@DB <- CellChatDB.use
+
+# Subset the expression data of signaling genes for saving computation cost
+# update object@data.signaling
+cellChat_eligible <- subsetData(cellChat_eligible)
+
+# Identify over-expressed signaling genes associated with each cell group
+# return object@var.features
+
+cellChat_eligible <- identifyOverExpressedGenes(cellChat_eligible)
+
+# Identify over-expressed ligand-receptor interactions (pairs) within the used CellChatDB
+# return object@LR$LRsig
+cellChat_eligible <- identifyOverExpressedInteractions(cellChat_eligible)
+
+# To further speed up on large-scale datasets, USER can downsample the data using the function 'subset' from Seurat package (e.g., pbmc.small <- subset(pbmc, downsample = 500)), or using the function 'sketchData' from CellChat, in particular for the large cell clusters;
+# return object@net$prob
+cellChat_eligible <- computeCommunProb(cellChat_eligible, type = "triMean")
+
+# Filter cell-cell communication if there are only few number of cells in certain cell groups
+# update object@net
+cellChat_eligible <- filterCommunication(cellChat_eligible, min.cells = 10)
+
+# Compute the communication probability on signaling pathway level by summarizing all related ligands/receptors
+# return object@netP
+cellChat_eligible <- computeCommunProbPathway(cellChat_eligible)
+
+# Calculate the aggregated network by counting the number of links or summarizing the communication probability
+# return object@net$count, object@net$weight, object@net$sum
+cellChat_eligible <- aggregateNet(cellChat_eligible)
+
+saveRDS(cellChat_eligible,"~/Primarytumor/cellchat_EGFR_eligible.rds")
+```
+
+##Compare cell-cell communication between ineligible and eligible groups
+```{r}
+cellchat_eligible <- readRDS("~/Primarytumor/cellchat_EGFR_eligible.rds")
+cellchat_eligible <- netAnalysis_computeCentrality(cellchat_eligible, slot.name = "netP")
+
+cellchat_ineligible <- readRDS("~/Primarytumor/cellchat_EGFR_ineligible.rds")
+cellchat_ineligible <- netAnalysis_computeCentrality(cellchat_ineligible, slot.name = "netP")
+
+object.list <- list(
+  EGFR_ineligible = cellchat_ineligible,
+  EGFR_eligible = cellchat_eligible
+  )
+
+cellchat <- mergeCellChat(object.list, cell.prefix = TRUE, add.names = names(object.list))
+cellchat
+```
+
+## Differential interaction heatmap (Comparison): Fig3E
+```{r}
+netVisual_heatmap(cellchat)
+netVisual_heatmap(cellchat, measure = "weight") #Fig3E
+```
+
+## Circle plots for EGF and CSF pathways: Fig3F-1～4
+```{r}
+# Circle plot
+pathways.show <- c("EGF") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  tiff(paste0("~/Primarytumor/paper/Figure3/Fig3F-",i, ".tiff"), 
+       width = 10, height = 10, units = "cm", res = 600, compression = "lzw")
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", 
+                      edge.weight.max = weight.max[1], edge.width.max = 8, 
+                      signaling.name = names(object.list)[i], arrow.size=0.5)
+  dev.off()
+} #Fig3F-1,2
+
+# Circle plot
+pathways.show <- c("CSF") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+for (i in 1:length(object.list)) {
+  tiff(paste0("~/Primarytumor/paper/Figure3/Fig3F-", i+2, ".tiff"), 
+       width = 10, height = 10, units = "cm", res = 600, compression = "lzw")
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", 
+                      edge.weight.max = weight.max[1], edge.width.max = 10, 
+                      signaling.name = names(object.list)[i], arrow.size=0)
+  dev.off()
+} #Fig3F-3,4
+```
+
+## Rank signaling pathways comparing Eligible vs Ineligible: suppleFig3C,D
+```{r}
+netP_eligible <- cellchat_eligible@netP$prob
+netP_ineligible <- cellchat_ineligible@netP$prob
+
+cellchat <- mergeCellChat(object.list, cell.prefix = TRUE, add.names = names(object.list))
+
+cellchat@netP$prob <- list(
+  EGFR_eligible = netP_eligible,
+  EGFR_ineligible = netP_ineligible
+)
+
+# rankNet
+#SFig3C: Rank pathways (Cancer -> Fibroblast)
+rankNet(cellchat, mode = "comparison", stacked = TRUE, sources.use = "Cancer cell", targets.use = "Fibroblast")+
+  theme(
+    legend.position = "bottom"
+  ) #SFig3C
+
+#SFig3D: Rank pathways (Fibroblast -> Myeloid cell)
+rankNet(cellchat, mode = "comparison", stacked = TRUE, sources.use = "Fibroblast", targets.use = "Myeloid cell")+
+  theme(
+    legend.position = "bottom"
+  ) #SFig3D
+```
+
+# NicheNet Analysis (Epithelial -> Fibroblast): Fig3G
+```{r}
+seuratObj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+seuratObj <- subset(seuratObj, condition=="Tumor")
+seuratObj@meta.data$cell_type[Idents(seuratObj) == 11] <- "Pericyte"
+
+seuratObj <- subset(seuratObj, cell_type %in% c("Epithelial cell", "Fibroblast"))
+
+Idents(seuratObj) <- "cell_type"
+
+options(timeout = 600)
+
+organism <- "human"
+
+if(organism == "human"){
+  lr_network <- readRDS(url("https://zenodo.org/record/7074291/files/lr_network_human_21122021.rds"))
+  ligand_target_matrix <- readRDS(url("https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final.rds"))
+  weighted_networks <- readRDS(url("https://zenodo.org/record/7074291/files/weighted_networks_nsga2r_final.rds"))
+} else if(organism == "mouse"){
+  lr_network <- readRDS(url("https://zenodo.org/record/7074291/files/lr_network_mouse_21122021.rds"))
+  ligand_target_matrix <- readRDS(url("https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final_mouse.rds"))
+  weighted_networks <- readRDS(url("https://zenodo.org/record/7074291/files/weighted_networks_nsga2r_final_mouse.rds"))
+}
+
+receiver = "Fibroblast"
+expressed_genes_receiver <- get_expressed_genes(receiver, seuratObj, pct = 0.05)
+
+all_receptors <- unique(lr_network$to)  
+expressed_receptors <- intersect(all_receptors, expressed_genes_receiver)
+
+potential_ligands <- lr_network %>% filter(to %in% expressed_receptors) %>% pull(from) %>% unique()
+
+sender_celltypes <- "Epithelial cell"
+
+expressed_genes_sender <- get_expressed_genes(sender_celltypes, seuratObj, 0.40)
+
+potential_ligands_focused <- intersect(potential_ligands, expressed_genes_sender)
+
+potential_ligands_focused
+# [1] "ADAM10"   "ADAM15"   "ADAM9"    "ADGRE5"   "ADM"     
+# [6] "ANG"      "ANXA2"    "APP"      "AREG"     "ARF1"    
+#[11] "ATP1B1"   "AZGP1"    "B2M"      "BACE2"    "BMP4"    
+#[16] "CALM1"    "CALM2"    "CALM3"    "CALR"     "CD320"   
+#[21] "CD44"     "CD47"     "CD55"     "CD9"      "CD99"    
+#[26] "CDCP1"    "CDH1"     "CEACAM1"  "CEACAM6"  "CKLF"    
+#[31] "CLDN1"    "CMTM8"    "COPA"     "CRB3"     "CTSD"    
+#[36] "CXCL16"   "CXCL2"    "CXCL3"    "DSC2"     "EDN1"    
+#[41] "EFNA1"    "EFNB1"    "EFNB2"    "EREG"     "EZR"     
+#[46] "F11R"     "FAM3C"    "GAS6"     "GDF15"    "GLG1"    
+#[51] "GNAS"     "GPI"      "GRN"      "GSTP1"    "HBEGF"   
+#[56] "HLA-A"    "HLA-B"    "HLA-E"    "HMGB1"    "IFITM1"  
+#[61] "IGFBP4"   "IL18"     "ITGB1"    "ITM2B"    "LAMB3"   
+#[66] "LAMC2"    "LCN2"     "LEFTY1"   "LGALS3"   "LGALS3BP"
+#[71] "LGALS9"   "LIPH"     "LRPAP1"   "MDK"      "MIF"     
+#[76] "NAMPT"    "NECTIN2"  "NUCB2"    "OCLN"     "PRSS3"   
+#[81] "PSAP"     "PTDSS1"   "PTPRK"    "RTN4"     "S100A4"  
+#[86] "SARAF"    "SDC4"     "SERPINA1" "SLPI"     "SPINK1"  
+#[91] "ST14"     "TGFBI"    "TGOLN2"   "TIMP1"    "TNFRSF14"
+#[96] "TNFSF10"  "TSPAN3"   "VEGFA"    "ZG16B"  
+
+length(expressed_genes_sender)
+## [1] 3509
+length(potential_ligands)
+## [1] 904
+length(potential_ligands_focused)
+## [1] 99
+
+condition_oi <-  "EGFR_eligible"
+condition_reference <- "EGFR_ineligible"
+
+seurat_obj_receiver <- subset(seuratObj, idents = receiver)
+
+DE_table_receiver <-  FindMarkers(object = seurat_obj_receiver,
+                                  ident.1 = condition_oi, ident.2 = condition_reference,
+                                  group.by = "EGFR_efficacy",
+                                  min.pct = 0.05) %>% rownames_to_column("gene")
+
+geneset_oi <- DE_table_receiver %>% filter(p_val_adj <= 0.1 & abs(avg_log2FC) >= 0.4) %>% pull(gene)
+geneset_oi <- geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+
+# Define background_expressed_genes
+background_expressed_genes <- expressed_genes_receiver %>% .[. %in% rownames(ligand_target_matrix)]
+
+length(background_expressed_genes)
+## [1] 10143
+length(geneset_oi)
+## [1] 1373
+
+# Run NicheNet ligand activity prediction
+ligand_activities <- predict_ligand_activities(geneset = geneset_oi,
+                                               background_expressed_genes = background_expressed_genes,
+                                               ligand_target_matrix = ligand_target_matrix,
+                                               potential_ligands = potential_ligands)
+
+ligand_activities <- ligand_activities %>% 
+  arrange(-aupr_corrected) %>% 
+  mutate(rank = rank(dplyr::desc(aupr_corrected)))
+
+ligand_activities
+# A tibble: 99 × 6
+#   test_ligand auroc  aupr aupr_corrected pearson  rank
+#   <chr>       <dbl> <dbl>          <dbl>   <dbl> <dbl>
+# 1 ADM         0.598 0.219         0.0849  0.120      4
+# 2 ANG         0.604 0.208         0.0745  0.120      6
+# 3 BMP4        0.586 0.202         0.0683  0.107     19
+# 4 OCLN        0.595 0.199         0.0652  0.122     27
+# 5 S100A4      0.591 0.199         0.0651  0.117     28
+# 6 ADAM9       0.582 0.199         0.0645  0.105     31
+# 7 TIMP1       0.586 0.197         0.0632  0.0955    42
+# 8 ITM2B       0.585 0.197         0.0631  0.0959    44
+# 9 EFNA1       0.588 0.197         0.0631  0.111     45
+#10 CDCP1       0.579 0.196         0.0621  0.108     53
+# ℹ 89 more rows
+# ℹ Use `print(n = ...)` to see more rows
+
+p_hist_lig_activity <- ggplot(ligand_activities, aes(x=aupr_corrected)) + 
+  geom_histogram(color="black", fill="darkorange")  + 
+  geom_vline(aes(xintercept=min(ligand_activities %>% top_n(30, aupr_corrected) %>% pull(aupr_corrected))),
+             color="red", linetype="dashed", size=1) + 
+  labs(x="ligand activity (PCC)", y = "# ligands") +
+  theme_classic()
+
+p_hist_lig_activity
+
+# Select top 30 ligands based on AUPR
+best_upstream_ligands <- ligand_activities %>% top_n(30, aupr_corrected) %>% arrange(-aupr_corrected) %>% pull(test_ligand)
+
+vis_ligand_aupr <- ligand_activities %>% filter(test_ligand %in% best_upstream_ligands) %>%
+  column_to_rownames("test_ligand") %>% dplyr::select(aupr_corrected) %>% arrange(aupr_corrected) %>% as.matrix(ncol = 1)
+
+(make_heatmap_ggplot(vis_ligand_aupr,
+                     "Prioritized ligands", "Ligand activity", 
+                     legend_title = "AUPR", color = "darkorange") + 
+    theme(axis.text.x.top = element_blank())) 
+
+# Analysis focusing on sender cell
+ligand_activities_all <- ligand_activities 
+best_upstream_ligands_all <- best_upstream_ligands
+
+ligand_activities <- ligand_activities %>% filter(test_ligand %in% potential_ligands_focused)
+best_upstream_ligands <- ligand_activities %>% top_n(30, aupr_corrected) %>% arrange(-aupr_corrected) %>%
+  pull(test_ligand) %>% unique()
+
+ligand_aupr_matrix <- ligand_activities %>% filter(test_ligand %in% best_upstream_ligands) %>%
+  column_to_rownames("test_ligand") %>% dplyr::select(aupr_corrected) %>% arrange(aupr_corrected)
+vis_ligand_aupr <- as.matrix(ligand_aupr_matrix, ncol = 1) 
+
+p_ligand_aupr <- make_heatmap_ggplot(vis_ligand_aupr,
+                     "Top 30 Prioritized ligands genes", "Ligand activity", 
+                     legend_title = "AUPR", color = "darkorange") + 
+    theme(axis.text.x.top = element_blank())
+
+p_ligand_aupr <- p_ligand_aupr + 
+  theme(legend.key.height = unit(0.3, "cm"),
+        legend.key.width = unit(1.0, "cm"))
+
+p_ligand_aupr #Fig3G-1
+
+# Receptor plot
+ligand_receptor_links_df <- get_weighted_ligand_receptor_links(
+  best_upstream_ligands, expressed_receptors,
+  lr_network, weighted_networks$lr_sig) 
+
+vis_ligand_receptor_network <- prepare_ligand_receptor_visualization(
+  ligand_receptor_links_df,
+  best_upstream_ligands,
+  order_hclust = "both") 
+
+p_ligand_receptor <- make_heatmap_ggplot(t(vis_ligand_receptor_network), 
+                     y_name = "Ligands", x_name = "Receptors",  
+                     color = "mediumvioletred", legend_title = "Prior interaction potential")
+
+p_ligand_receptor
+
+# Target gene plot
+active_ligand_target_links_df <- best_upstream_ligands %>%
+  lapply(get_weighted_ligand_target_links,
+         geneset = geneset_oi,
+         ligand_target_matrix = ligand_target_matrix,
+         n = 100) %>%
+  bind_rows() %>% drop_na()
+
+active_ligand_target_links <- prepare_ligand_target_visualization(
+  ligand_target_df = active_ligand_target_links_df,
+  ligand_target_matrix = ligand_target_matrix,
+  cutoff = 0) 
+
+order_ligands <- intersect(best_upstream_ligands, colnames(active_ligand_target_links)) %>% rev()
+order_targets <- active_ligand_target_links_df$target %>% unique() %>% intersect(rownames(active_ligand_target_links))
+
+vis_ligand_target <- t(active_ligand_target_links[order_targets,order_ligands])
+
+p_ligand_target <- make_heatmap_ggplot(vis_ligand_target, "Prioritized ligands", "Predicted target genes",
+                    color = "purple", legend_title = "Regulatory potential") +
+  scale_fill_gradient2(low = "whitesmoke",  high = "purple")
+
+p_ligand_target
+
+# Target gene of EREG
+ereg_targets <- active_ligand_target_links_df %>%
+  filter(ligand == "EREG") %>%
+  pull(target) %>%
+  unique()
+
+vis_ereg_target <- active_ligand_target_links[ereg_targets, "EREG", drop = FALSE] 
+
+tiff("~/Primarytumor/paper/Fig3/Fig3G-2.tiff", 
+     width = 4, height = 8, units = "cm", res = 600, compression = "lzw")
+pheatmap(
+  vis_ereg_target,
+  scale = "none",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  clustering_method = "ward.D2",
+  border_color = NA,
+  cellwidth = 10,
+  cellheight = 10,
+  fontsize = 6,
+  legend = FALSE,
+  color = colorRampPalette(c("whitesmoke", "purple"))(100)
+)
+dev.off() #Fig3G-2
+```
+
+# Session Information
+```{r echo=FALSE}
+sessionInfo()
+#R version 4.4.0 (2024-04-24 ucrt)
+#Platform: x86_64-w64-mingw32/x64
+#Running under: Windows 11 x64 (build 26100)
+
+#Matrix products: default
+
+
+#locale:
+#[1] LC_COLLATE=Japanese_Japan.utf8  LC_CTYPE=Japanese_Japan.utf8   
+#[3] LC_MONETARY=Japanese_Japan.utf8 LC_NUMERIC=C                   
+#[5] LC_TIME=Japanese_Japan.utf8    
+
+#time zone: Asia/Tokyo
+#tzcode source: internal
+
+#attached base packages:
+#[1] stats     graphics  grDevices utils     datasets  methods   base     
+
+#other attached packages:
+# [1] future_1.34.0       ggrepel_0.9.6       patchwork_1.3.0    
+# [4] pheatmap_1.0.12     nichenetr_2.1.7     CellChat_2.1.2     
+# [7] Biobase_2.64.0      BiocGenerics_0.52.0 igraph_2.1.4       
+#[10] lubridate_1.9.4     forcats_1.0.0       stringr_1.5.1      
+#[13] dplyr_1.1.4         purrr_1.0.4         readr_2.1.5        
+#[16] tidyr_1.3.1         tibble_3.2.1        ggplot2_3.5.1      
+#[19] tidyverse_2.0.0     Seurat_5.2.1        SeuratObject_5.0.2 
+#[22] sp_2.2-0            kableExtra_1.4.0   
+
+#loaded via a namespace (and not attached):
+#  [1] IRanges_2.38.1              coin_1.4-3                 
+#  [3] nnet_7.3-20                 goftest_1.2-3              
+#  [5] TH.data_1.1-3               vctrs_0.6.5                
+#  [7] spatstat.random_3.3-3       digest_0.6.37              
+#  [9] png_0.1-8                   shape_1.4.6.1              
+# [11] proxy_0.4-27                registry_0.5-1             
+# [13] deldir_2.0-4                parallelly_1.43.0          
+# [15] MASS_7.3-65                 reshape2_1.4.4             
+# [17] httpuv_1.6.15               foreach_1.5.2              
+# [19] withr_3.0.2                 xfun_0.52                  
+# [21] ggpubr_0.6.0                survival_3.8-3             
+# [23] systemfonts_1.2.2           zoo_1.8-13                 
+# [25] GlobalOptions_0.1.2         gtools_3.9.5               
+# [27] pbapply_1.7-2               argparse_2.2.5             
+# [29] Formula_1.2-5               promises_1.3.2             
+# [31] httr_1.4.7                  rstatix_0.7.2              
+# [33] globals_0.16.3              fitdistrplus_1.2-2         
+# [35] rstudioapi_0.17.1           UCSC.utils_1.2.0           
+# [37] miniUI_0.1.1.1              generics_0.1.3             
+# [39] base64enc_0.1-3             ggalluvial_0.12.5          
+# [41] S4Vectors_0.42.1            zlibbioc_1.50.0            
+# [43] randomForest_4.7-1.2        polyclip_1.10-7            
+# [45] GenomeInfoDbData_1.2.13     SparseArray_1.6.1          
+# [47] xtable_1.8-4                doParallel_1.0.17          
+# [49] evaluate_1.0.3              S4Arrays_1.4.1             
+# [51] hms_1.1.3                   GenomicRanges_1.56.1       
+# [53] irlba_2.3.5.1               colorspace_2.1-1           
+# [55] visNetwork_2.1.2            ggnetwork_0.5.13           
+# [57] ROCR_1.0-11                 reticulate_1.42.0          
+# [59] spatstat.data_3.1-6         magrittr_2.0.3             
+# [61] lmtest_0.9-40               later_1.4.2                
+# [63] modeltools_0.2-23           lattice_0.22-6             
+# [65] spatstat.geom_3.3-6         NMF_0.28                   
+# [67] future.apply_1.11.3         scattermore_1.2            
+# [69] shadowtext_0.1.4            cowplot_1.1.3              
+# [71] matrixStats_1.5.0           RcppAnnoy_0.0.22           
+# [73] Hmisc_5.2-3                 class_7.3-23               
+# [75] pillar_1.10.2               nlme_3.1-168               
+# [77] iterators_1.0.14            sna_2.8                    
+# [79] gridBase_0.4-7              caTools_1.18.3             
+# [81] compiler_4.4.0              RSpectra_0.16-2            
+# [83] stringi_1.8.7               gower_1.0.2                
+# [85] tensor_1.5                  SummarizedExperiment_1.36.0
+# [87] plyr_1.8.9                  crayon_1.5.3               
+# [89] abind_1.4-8                 locfit_1.5-9.12            
+# [91] rjags_4-17                  sandwich_3.1-1             
+# [93] libcoin_1.0-10              fastcluster_1.2.6          
+# [95] codetools_0.2-20            multcomp_1.4-28            
+# [97] recipes_1.2.1               bslib_0.9.0                
+# [99] e1071_1.7-16                GetoptLong_1.0.5           
+#[101] plotly_4.10.4               mime_0.13                  
+#[103] splines_4.4.0               circlize_0.4.16            
+#[105] Rcpp_1.0.14                 fastDummies_1.7.5          
+#[107] knitr_1.50                  clue_0.3-66                
+#[109] checkmate_2.3.2             listenv_0.9.1              
+#[111] infercnv_1.22.0             ggsignif_0.6.4             
+#[113] Matrix_1.7-2                statmod_1.5.0              
+#[115] tzdb_0.5.0                  svglite_2.1.3              
+#[117] phyclust_0.1-34             tweenr_2.0.3               
+#[119] pkgconfig_2.0.3             network_1.19.0             
+#[121] tools_4.4.0                 cachem_1.1.0               
+#[123] viridisLite_0.4.2           fastmap_1.2.0              
+#[125] rmarkdown_2.29              scales_1.3.0               
+#[127] grid_4.4.0                  ica_1.0-3                  
+#[129] broom_1.0.8                 sass_0.4.9                 
+#[131] coda_0.19-4.1               FNN_1.1.4.1                
+#[133] BiocManager_1.30.25         dotCall64_1.2              
+#[135] carData_3.0-5               RANN_2.6.2                 
+#[137] rpart_4.1.24                farver_2.1.2               
+#[139] yaml_2.3.10                 foreign_0.8-90             
+#[141] MatrixGenerics_1.18.1       DiagrammeR_1.0.11          
+#[143] cli_3.6.3                   stats4_4.4.0               
+#[145] lifecycle_1.0.4             caret_7.0-1                
+#[147] uwot_0.2.3                  mvtnorm_1.3-3              
+#[149] lambda.r_1.2.4              lava_1.8.1                 
+#[151] backports_1.5.0             BiocParallel_1.40.0        
+#[153] timechange_0.3.0            gtable_0.3.6               
+#[155] rjson_0.2.23                ggridges_0.5.6             
+#[157] progressr_0.15.1            parallel_4.4.0             
+#[159] pROC_1.18.5                 ape_5.8-1                  
+#[161] limma_3.62.2                jsonlite_1.8.9             
+#[163] edgeR_4.4.2                 RcppHNSW_0.6.0             
+#[165] bitops_1.0-9                Rtsne_0.17                 
+#[167] spatstat.utils_3.1-3        BiocNeighbors_2.0.1        
+#[169] RcppParallel_5.1.10         futile.options_1.0.1       
+#[171] jquerylib_0.1.4             spatstat.univar_3.1-2      
+#[173] timeDate_4041.110           lazyeval_0.2.2             
+#[175] shiny_1.10.0                htmltools_0.5.8.1          
+#[177] sctransform_0.4.1           formatR_1.14               
+#[179] glue_1.8.0                  spam_2.11-1                
+#[181] XVector_0.44.0              futile.logger_1.4.3        
+#[183] gridExtra_2.3               R6_2.6.1                   
+#[185] fdrtool_1.2.18              SingleCellExperiment_1.28.1
+#[187] gplots_3.2.0                cluster_2.1.8.1            
+#[189] rngtools_1.5.2              GenomeInfoDb_1.42.3        
+#[191] ipred_0.9-15                statnet.common_4.11.0      
+#[193] DelayedArray_0.32.0         tidyselect_1.2.1           
+#[195] htmlTable_2.4.3             ggforce_0.4.2              
+#[197] xml2_1.3.8                  car_3.1-3                  
+#[199] ModelMetrics_1.2.2.2        munsell_0.5.1              
+#[201] KernSmooth_2.23-26          data.table_1.17.0          
+#[203] htmlwidgets_1.6.4           ComplexHeatmap_2.22.0      
+#[205] RColorBrewer_1.1-3          rlang_1.1.5                
+#[207] spatstat.sparse_3.1-0       spatstat.explore_3.4-2     
+#[209] ggnewscale_0.5.1            parallelDist_0.2.6         
+#[211] hardhat_1.4.1               prodlim_2024.06.25 
+
+info <- sessionInfo()
+```
+
+paste("Analysis performed using R version", paste(info$R.version$major, info$R.version$minor, sep="."))
+[1] "Analysis performed using R version 4.4.0"
+
+```{r echo=FALSE}
+pkg.info <- getPkgInfo(info)
+kable(pkg.info, format = "html", row.names=F) %>% kable_styling()
+```

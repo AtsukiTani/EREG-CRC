@@ -1,0 +1,1420 @@
+---
+title: "Fig4"
+author: "Atsuki Taniguchi"
+date: "`r format(Sys.time(), '%Y年%m月%d日')`"
+output:
+ html_document:
+  toc: true
+  toc_float: true
+  toc_depth: 6 
+  number_sections: true
+---
+```{=html}
+<style>
+div.blue pre { background-color:lightblue !important; }
+div.blue pre.r { background-color:lightyellow !important; }
+</style>
+```
+<div class = "blue">
+
+```{r setup, include=FALSE}
+library(kableExtra)
+
+knitr::opts_chunk$set(cache=FALSE, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.width=10, fig.height=8)
+
+```
+
+```{r}
+# Helper function for package info
+getPkgInfo <- function(info){
+  #info <- sessionInfo()
+  pkg <- info$otherPkgs
+  pkg.info <- t(sapply(pkg, function(p){
+    out <- matrix(c(Package=ifelse(is.null(p$Package),"-",p$Package),
+                    Version=ifelse(is.null(p$Version),"-",p$Version),
+                    Title=ifelse(is.null(p$Title),"-",p$Title),
+                    License=ifelse(is.null(p$License),"-",p$License),
+                    Repository=ifelse(is.null(p$Repository),"-",p$Repository)), nrow=1, ncol=5)
+  }))
+  colnames(pkg.info) <- c("Package","Version","Overview","License","Repository")
+  return(pkg.info)
+}
+```
+
+# Loading packages
+```{r}
+library(Seurat);library(tidyverse);library(patchwork);library(ktplots);library(pheatmap);library(viridis);library(CellChat);library(clusterProfiler);library(scales);library(future)
+```
+
+# Subset and re-integrate Fibroblasts and Pericytes: Fig4A
+```{r}
+set.seed(123)
+obj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+
+FeaturePlot(obj, features = "COL1A1", reduction = "umap") #Fig4A-1
+FeaturePlot(obj, features = "RGS5", reduction = "umap") #Fig4A-2
+
+table(obj@meta.data[["cell_type"]])
+obj <- subset(obj, cell_type %in% c("Fibroblast", "Pericyte"))
+obj <- subset(obj, condition=="Tumor")
+
+plot <- DimPlot(obj, group.by="cell_type",label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+obj <- subset(obj, cells = select1)
+
+count <- table(obj@meta.data[["PatientID"]])
+patient <- names(count[count <= 80])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$PatientID %in% patient, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+count <- table(obj@meta.data[["sample"]])
+small_samples <- names(count[count < 80])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$sample %in% small_samples, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+obj@reductions <- list()
+
+obj@assays$RNA <- split(x=obj@assays$RNA, f=obj@meta.data$PatientID)
+
+obj <- NormalizeData(obj)
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj)
+obj <- RunPCA(obj)
+
+options(future.globals.maxSize = 35 * 1024^3)
+
+obj <- IntegrateLayers(object = obj, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",
+    verbose = FALSE, k.weight = 70)
+
+obj[["RNA"]] <- JoinLayers(obj[["RNA"]])
+
+obj <- FindNeighbors(obj, reduction = "integrated.rpca", dims = 1:30)
+obj <- FindClusters(obj, resolution = 0.1)
+obj <- RunUMAP(obj, dims = 1:30, reduction = "integrated.rpca")
+DimPlot(obj, label=T)
+
+saveRDS(obj, "~/Primarytumor/Fibroblast_integrated_tumor.RDS")
+```
+
+# Prepare marker gene list for ACT
+```{r}
+obj <- readRDS("~/Primarytumor/Fibroblast_integrated_tumor.RDS")
+markers <- FindAllMarkers(obj, min.pct = 0.4, logfc.threshold = 1,only.pos = TRUE)
+
+results_df <- data.frame(cluster = integer(), genes = character(), stringsAsFactors = FALSE)
+
+for (i in 1:16) {
+    cluster_result <- markers %>%
+        filter(cluster == as.character(i-1)) %>%
+        arrange(p_val_adj) %>%
+        slice_head(n = 30) %>%
+        summarise(genes = paste(gene, collapse = ","))
+
+    cluster_label <- paste0("cluster", i - 1, ":", cluster_result$genes)
+    results_df <- rbind(results_df, data.frame(cluster = cluster_label, stringsAsFactors = FALSE))
+}
+
+write.table(results_df, file = "~/Primarytumor/cluster_genes_fibroblast.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+# Feature plots for CAF/Pericyte markers: suppleFig4A-1～6
+```{r}
+FeaturePlot(obj, "ACTA2", pt.size = 1, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) + 
+  bottomright_legend() #SFig4A-1
+FeaturePlot(obj, "FAP", pt.size = 1, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) + 
+  bottomright_legend() #SFig4A-2
+FeaturePlot(obj, "RGS5", pt.size = 1, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) + 
+  bottomright_legend() #SFig4A-3
+FeaturePlot(obj, "SOX6", pt.size = 1, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) + 
+  bottomright_legend() #SFig4A-4
+FeaturePlot(obj, "CSF1", pt.size = 1, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) + 
+  bottomright_legend() #SFig4A-5
+FeaturePlot(obj, "ADAMDEC1", pt.size = 1, order = TRUE) + 
+  scale_color_gradientn(colours = c("gray", "lightblue", "red", "darkred")) + 
+  bottomright_legend() #SFig4A-6
+```
+
+# Annotate Fibroblast/Pericyte subtypes and analyze proportions/EGFR expression: Fig4B
+```{r}
+CAF <- obj
+
+CAF@meta.data$cell_type <- case_when(
+  CAF@meta.data$seurat_clusters %in% c(2, 5, 8) ~ "Pericyte",
+  CAF@meta.data$seurat_clusters == 1 ~ "iCAF",
+  CAF@meta.data$seurat_clusters == 0 ~ "myCAF",
+  CAF@meta.data$seurat_clusters == 3 ~ "SOX6+Fib",
+  CAF@meta.data$seurat_clusters == 4 ~ "ADAMDEC1+Fib",
+  CAF@meta.data$seurat_clusters == 7 ~ "apCAF",
+  CAF@meta.data$seurat_clusters == 6 ~ "SMC"
+)
+
+saveRDS(CAF, "~/Primarytumor/Fibroblast_addmarkers.RDS")
+
+DimPlot(CAF, group.by = "cell_type")+
+  theme(
+    legend.position = "bottom"
+  ) #Fig4B-1
+
+CAF <- subset(CAF, subset = cell_type != "Pericyte")
+
+table(CAF@meta.data[["cell_type"]])
+
+cell_counts <- CAF@meta.data %>%
+  group_by(EGFR_efficacy, cell_type) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(EGFR_efficacy) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+
+cell_counts$cell_type <- factor(cell_counts$cell_type, levels = c("myCAF", "iCAF", "apCAF", "SOX6+Fib", "ADAMDEC1+Fib",  "SMC"))
+
+caf_colors <- c(
+  "myCAF" = "#E64B35",         
+  "iCAF" = "#4DBBD5",         
+  "apCAF" = "#00A087",            
+  "SOX6+Fib" = "#3C5488",    
+  "ADAMDEC1+Fib" = "#F39B7F",
+  "SMC" = "#F1A340"               
+)
+
+ggplot(cell_counts, aes(x = EGFR_efficacy, y = Percentage, fill = cell_type)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = caf_colors) +
+  theme_minimal()  +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),  
+        legend.text = element_text(size = 9)) #Fig4B-2 
+
+table(CAF@meta.data[["cell_type"]])
+```
+
+# Calculate and plot iCAF/myCAF module scores (Elyada et al.): supple4B
+```{r}
+# Get signatures for iCAF and myCAF from Supplemental Table 13 of Elyada 2019 CANCER DISCOVERY
+
+readLines("clipboard") -> myCAF
+readLines("clipboard") -> iCAF
+
+myCAF
+# [1] "MYL9"    "CALD1"   "MMP11"   "HOPX"    "BGN"     "IGFBP7"  "TPM2"    "CTHRC1" 
+# [9] "ACTA2"   "TAGLN"   "INHBA"   "COL10A1" "TPM1"    "POSTN"   "GRP"     "CST1"  
+iCAF
+# [1] "C3"      "DUSP1"   "FBLN1"   "LMNA"    "CLU"     "CCDC80"  "MYC"     "EFEMP1" 
+# [9] "HAS1"    "NR4A1"   "CFD"     "ANXA1"   "CXCL12"  "FGF7"    "KLF4"    "EMP1"   
+#[17] "GPRC5A"  "SRPX"    "MT2A"    "MEDAG"   "IGF1"    "MGST1"   "MCL1"    "CEBPD"  
+#[25] "S100A10" "UAP1"    "TNXB"    "CEBPB"   "PNRC1"   "SOCS3"   "PTGDS"   "FOSB"   
+#[33] "NFKBIA"  "CXCL2"   "THBS1"   "CCL2"    "OGN"     "GSN"     "DPT"     "PLA2G2A"
+#[41] "NAMPT"   "ITM2A"   "RGCC"    "JUND"    "NNMT"    "ZFP36"   "PIM1"    "CPE"    
+#[49] "GFPT2"   "SOD2"    "KDM6B"   "FSTL1"   "FBLN2"   "NR4A3"   "MFAP5"   "ABL2"   
+#[57] "SGK1"    "CILP"    "UGDH"    "FBLN5"   "ADAMTS1" "ADH1B"   "WISP2"   "GPX3"   
+#[65] "S100A4"  "IL6"     "HAS2"    "PLAC9"   "IGFBP6"  "FBN1"    "BDKRB1"  "TPPP3"  
+#[73] "RASD1"   "MT1A"    "CXCL14"  "PI16"    "APOE"    "IL8"     "ARC"     "PTX3"   
+#[81] "TNFAIP6" "MT1E"    "MT1X"    "CXCL1"    
+
+# Add module score
+CAF <- AddModuleScore(CAF, features = list(myCAF), name = "myCAF_score")
+CAF <- AddModuleScore(CAF, features = list(iCAF), name = "Inflammatory_CAF_score")
+
+CAF@meta.data$cell_type <- case_when(
+  CAF@meta.data$seurat_clusters %in% c(0, 1, 2, 3, 10) ~ "myCAF",
+  CAF@meta.data$seurat_clusters %in% c(4,6,7, 9) ~ "iCAF"
+)
+
+saveRDS(CAF, "~/Primarytumor/Fibroblast_addmarkers_2type.RDS")
+
+FeaturePlot(CAF, features = "myCAF_score1", order = T, pt.size = 0.8) + scale_color_viridis(option = "H")+
+  theme(
+    plot.title = element_blank()
+  ) #SFig4B-1
+
+FeaturePlot(CAF, features = "Inflammatory_CAF_score1", order = T, pt.size = 0.8) + scale_color_viridis(option = "H")+
+  theme(
+    plot.title = element_blank()
+  ) #SFig4B-2
+```
+
+# Project Normal Fibroblasts (NF) onto CAF UMAP reference: suppleFig4C-1～2,suppleFig4D
+```{r}
+set.seed(123)
+
+obj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+NF.query <- subset(obj, condition=="Normal" & cell_type == "Fibroblast")
+NF.query <- NormalizeData(NF.query)
+
+CAF.ref <- readRDS("~/Primarytumor/Fibroblast_addmarkers.RDS")
+CAF.ref <- subset(CAF.ref, subset=cell_type != "Pericyte")
+
+fibro.anchors <- FindTransferAnchors(reference = CAF.ref, query = NF.query, dims = 1:50,
+    reference.reduction = "integrated.rpca")
+
+CAF.ref <- RunUMAP(CAF.ref, dims = 1:50, reduction = "integrated.rpca", return.model = TRUE)
+
+NF.query <- MapQuery(anchorset = fibro.anchors, reference = CAF.ref, query = NF.query,
+    refdata = list(celltype = "cell_type"), reference.reduction = "integrated.rpca", reduction.model = "umap")
+
+caf_colors <- c(
+  "myCAF" = "#E64B35",      
+  "iCAF" = "#4DBBD5",         
+  "apCAF" = "#00A087",          
+  "SOX6+Fib" = "#3C5488",    
+  "ADAMDEC1+Fib" = "#F39B7F",
+  "SMC" = "#F1A340"            
+)
+
+# UMAP of CAF reference
+DimPlot(CAF.ref, reduction = "umap", group.by = "cell_type", label = TRUE, 
+              label.size = 4, repel = TRUE, cols = caf_colors)+
+  theme(
+    legend.position = "bottom"
+  )+
+  ggtitle(NULL) #SFig4C-1
+
+DimPlot(NF.query, reduction = "ref.umap", group.by = "predicted.celltype", 
+              label = TRUE, label.size = 4, repel = TRUE, cols = caf_colors)+
+  theme(
+    legend.position = "bottom"
+  )+
+  ggtitle(NULL) #SFig4C-2
+
+cell_counts <- CAF.ref@meta.data %>%
+  group_by(EGFR_efficacy, cell_type) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(EGFR_efficacy) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+
+cell_counts$cell_type <- factor(cell_counts$cell_type, levels = c("myCAF", "iCAF", "apCAF", "SOX6+Fib", "ADAMDEC1+Fib",  "SMC"))
+
+ggplot(cell_counts, aes(x = EGFR_efficacy, y = Percentage, fill = cell_type)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = caf_colors) +
+  theme_minimal() +
+  labs(title = NULL,
+       x = NULL,
+       y = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.8, size = 12),  
+        legend.text = element_text(size = 12))  
+
+cell_counts <- NF.query@meta.data %>%
+  group_by(EGFR_efficacy, predicted.celltype) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(EGFR_efficacy) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+
+cell_counts$predicted.celltype <- factor(cell_counts$predicted.celltype, levels = c("myCAF", "iCAF", "apCAF", "SOX6+Fib", "ADAMDEC1+Fib",  "SMC"))
+
+ggplot(cell_counts, aes(x = EGFR_efficacy, y = Percentage, fill = predicted.celltype)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_fill_manual(values = caf_colors) +
+  theme_minimal() +
+  labs(title = NULL,
+       x = NULL,
+       y = NULL) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.8, size = 12),  
+        legend.text = element_text(size = 12)) #SFig4D
+```
+
+# GSEA of CAF subtypes using published signatures: Fig4D
+```{r}
+## Kieffer et al. 
+# IL-iCAF
+IL_iCAF_Kieffer <- c(
+  "ITM2A", "CXCL12", "FIGF", "FXYD1", "PLPP3", "TNFRSF10D", "CTB-92J24.3",
+  "LAMC3", "C7", "ZBTB16", "CAPN6", "SCARA5", "DLK1", "MEG3", "TAC1",
+  "THUMPD3-AS1", "GMFG", "CYGB", "CCL8", "VCAM1", "FMO2", "FBLN5", "COLEC12",
+  "PDGFD", "GADD45G", "SNAI1", "LSP1", "CCL2", "IL6", "PTGS2", "NR2F1",
+  "F10", "CEBPA", "KDM6B", "PID1"
+)
+
+# IFNr-iCAF
+IFNr_iCAF_Kieffer <- c(
+  "CCL19", "VCAM1", "RBP5", "CYP1B1", "C7", "TNFRSF4", "CXCL13", "CXCL9",
+  "CCL2", "IL34", "ABI3BP", "CYP7B1", "F10", "COLEC12", "CXCL10", "EMILIN1",
+  "GGT5", "EGFLAM", "PLXDC1", "CXCL11", "CCL8", "CXCL3"
+)
+
+# ecm-myCAF
+ecm_myCAF_Kieffer <- c(
+  "ASPN", "COL3A1", "THY1", "SFRP2", "COL10A1", "COL6A3", "LRRC17", "CILP",
+  "GRP", "ITGBL1", "COL8A1", "COL14A1", "ADAM12", "OLFML2B", "ELN", "PLPP4",
+  "CREB3L1", "FBN1", "LOXL1", "MATN3", "LRRC15", "COMP", "ISLR", "P3H1",
+  "COL11A1", "SEPT11", "NBL1", "SPON1", "SULF1", "FNDC1", "CNN1", "MIAT",
+  "MMP23B", "CPXM1", "FIBIN", "P4HA3", "GXYLT2", "CILP2", "P3H4", "CCDC80"
+)
+
+# TGFb-myCAF
+TGFb_myCAF_Kieffer <- c(
+  "CST1", "LAMP5", "LOXL1", "EDNRA", "TGFB1", "TGFB3", "TNN", "CST2",
+  "HES4", "COL10A1", "ELN", "THBS4", "NKD2", "OLFM2", "COL6A3", "LRRC17",
+  "COL3A1", "THY1", "HTRA3", "TMEM204", "SEPT11", "COMP", "TNFAIP6", "ID4",
+  "GGT5", "INAFM1", "CILP", "OLFML2B"
+)
+
+# wound-myCAF
+wound_myCAF_Kieffer <- c(
+  "SFRP4", "CCDC80", "OGN", "DCN", "PTGER3", "SFRP2", "PDGFRL", "SMOC2",
+  "MMP23B", "CPXM2", "COL14A1", "ITGBL1", "WISP2", "CILP2", "COL8A1", "GAS1",
+  "COL3A1", "OMD", "COL11A1", "CILP", "NEXN", "ASPN", "RARRES2", "FIBIN",
+  "TMEM119", "KERA", "ID4", "GRP", "COMP", "DPT", "ELN", "FBLN2", "IGF1",
+  "IGF2"
+)
+
+# detox-iCAF
+detox_iCAF_Kieffer <- c(
+  "ADH1B", "C7", "CXCL12", "TNXB", "RSPO3", "DCN", "C16orf89", "GDF10",
+  "PAMR1", "FXYD1", "ZBTB16", "SLIT3", "HSPB6", "IL6", "FBLN5", "OGN",
+  "PLA2G2A", "CHRDL1", "CYGB", "FGF7", "PI16", "PLAC9", "WISP2", "PTX3",
+  "CCL2", "CXCL3"
+)
+
+## Elyada et al.
+# apCAF
+apCAF_Elyada <- c(
+  "HLA-DRA", "HLA-DPA1", "HLA-DQA1", "CD74", "SLPI"
+)
+
+# iCAF
+iCAF_Elyada <- c(
+  "C3","DUSP1","FBLN1","LMNA","CLU","CCDC80","MYC","EFEMP1","HAS1","NR4A1",
+  "CFD","ANXA1","CXCL12","FGF7","KLF4","EMP1","GPRC5A","SRPX","MT2A","MEDAG",
+  "IGF1","MGST1","MCL1","CEBPD","S100A10","UAP1","TNXB","CEBPB","PNRC1",
+  "SOCS3","PTGDS","FOSB","NFKBIA","CXCL2","THBS1","CCL2","OGN","GSN","DPT",
+  "PLA2G2A","NAMPT","ITM2A","RGCC","JUND","NNMT","ZFP36","PIM1","CPE",
+  "GFPT2","SOD2","KDM6B","FSTL1","FBLN2","NR4A3","MFAP5","ABL2","SGK1",
+  "CILP","UGDH","FBLN5","ADAMTS1","ADH1B","WISP2","GPX3","S100A4","IL6",
+  "HAS2","PLAC9","IGFBP6","FBN1","BDKRB1","TPPP3","RASD1","MT1A","CXCL14",
+  "PI16","APOE","IL8","ARC","PTX3","TNFAIP6","MT1E","MT1X","CXCL1"
+)
+
+# myCAF
+myCAF_Elyada <- c(
+  "MYL9","CALD1","MMP11","HOPX","BGN","IGFBP7","TPM2","CTHRC1","ACTA2","TAGLN",
+  "INHBA","COL10A1","TPM1","POSTN","GRP","CST1"
+)
+
+## Pelka et al.
+# cS21 (Fibro stem cell niche)
+cS21_Pelka <- c(
+  "MFAP5", "IGFBP6", "CD55", "PCOLCE2", "PLAC9", "DCN", "TNXB", "EFEMP1",
+  "FBLN2", "CFD", "CST3", "S100A4", "CLEC3B", "GSN", "C1QTNF3", "FBN1",
+  "CD248", "ITM2A", "FSTL1", "GPX3", "S100A10", "PI16", "SLPI", "ANXA2",
+  "SFRP1", "SCARA5", "CD99", "PLPP3", "CADM3", "ADH1B", "TIMP3", "PRELP",
+  "OSR2", "CLU", "CILP", "UAP1", "SEMA3C", "ITM2B", "S100A6", "MGP",
+  "MGST1", "GPNMB", "KLF4", "PSAP", "CYBRD1", "APP", "SOD3", "OLFML3",
+  "KRT24", "FN1", "LTBP4", "TPPP3", "PPIC", "FCGRT", "CCDC80", "SH3BGRL3",
+  "OGN", "WISP2", "PIGT", "F10", "SMIM14", "FBLN1", "CD34", "DPT",
+  "VKORC1", "EBF1", "FXYD1", "SERPINE2", "C17orf58", "CLTB", "SDCBP",
+  "GPX4", "MFAP4", "ADI1", "CREB5", "DDAH2", "ISLR", "SEMA3B", "PHGDH",
+  "EMP3", "DBN1", "CPQ", "NPC2", "PMP22", "ADAMTS5", "TIMP2", "KLF2",
+  "PAMR1", "RP11-48O20.4", "SHISA3", "SEMA3E", "LOXL1", "PROCR", "GRN",
+  "RHOA", "TGFBR3", "CLDN11", "MFGE8", "RP11-14N7.2", "SEPP1"
+)
+
+# cS23 (Fibro BMP-producing)
+cS23_Pelka <- c(
+  "CXCL14","F3","PLAT","PDGFRA","RGS10","BMP5","HSD17B2","COL6A2","FENDRR",
+  "TMEM176B","APOE","MFGE8","DMKN","NSG1","COL6A1","ENHO","WFDC1","EDNRB",
+  "CEBPD","EMILIN1","SLITRK6","TRPA1","FOXF1","FRZB","TMEM176A","BMP4",
+  "RARRES2","CYGB","TGFBI","APLP2","NBL1","SOX6","PPP1R14A","COL3A1",
+  "NRG1","SCPEP1","S100A13","SDC2","LTBP4","BSG","POSTN","COL6A3","EMID1",
+  "MMP2","ACP5","IGFBP3","LOX","LGALS3BP","C11orf96","PCDH18","CTSD","ECM1",
+  "VCAN","GPX3","GADD45G","TMEM119","NPY","PITX1","KREMEN1","MRPS6","PXDN",
+  "FAM105A","FAM150B","CEBPB","CRISPLD2","ITGA8","ADGRL3","AGT","TPM2",
+  "WNT5A","GJA1","BMP2","PROM1","LTBP1","IL1R1","PROCR","CALD1","UBB",
+  "PTCH1","INSC","HLA-A","TSPAN33","RARRES3","VEGFA","EMP3","VSTM2A",
+  "F2R","MALAT1","CSF1","LGALS1","PDGFD","CTSB","PTGS1","C8orf4","MCTP2",
+  "STMN2","FTL","TIMP1","TSC22D3","HMGN2","F3","CXCL14","PLAT","BMP5",
+  "HSD17B2","PDGFRA","FRZB","FENDRR","RGS10","MFGE8","SLITRK6","WFDC1",
+  "DMKN","ENHO","APLP2","NSG1","PPP1R14A","IGFBP3","TM4SF1","B2M","EDNRB",
+  "TRPA1","HLA-A","FOXF1","NRG1","SOX6","BSG","APOE","MALAT1","PXDN",
+  "TMEM176B","CYGB","BMP4","NPY","CD9","ITGA8","ACP5","S100A13","MAP1B",
+  "CEBPD","GADD45G","LAMA5","MRPS6","CTSD","COL6A2","CAV1","GJA1","HLA-B",
+  "SCPEP1","C8orf4","TGFBI","H3F3B","EMID1","LOX","UBB","GMFG","FAM105A",
+  "PDLIM1","BMP2","EMILIN1","TBX2","KREMEN1","FAM150B","F2R","LTBP1",
+  "POSTN","C9orf16","PROM1","PCDH18","PTMA","INSC","PDGFD","PTGS1","ADGRL3",
+  "VSTM2A","TMEM176A","JUNB","MT-CO1","PTPRE","TMEM119","C11orf96","HMGN2",
+  "SLC9A3R2","IFI27","SDC2","COL6A1","CIRBP","COL4A5","CXCR4","A2M","LAMC3",
+  "ETS2","C7orf50","HMGB1","TSPAN33","MGLL","EID1","DACH1","MCTP2","BST2"
+)
+
+# cS25 (Fibro CCL8+)
+cS25_Pelka <- c(
+  "ADAMDEC1","APOE","CXCL14","CFD","CTSC","ABCA8","ADAM28","C1S","TMEM176B",
+  "TCF21","FBLN1","MFAP4","LUM","TMEM176A","LTBP4","EMILIN1","EDIL3","DCN",
+  "CEBPD","CFH","HAPLN1","COL3A1","CCL2","RBP1","CCL13","CCL11","A2M",
+  "SCARA5","RP11-805I24.2","MEG3","C1R","STMN2","CYGB","CCL8","MATN2","VCAN",
+  "COL6A2","COL1A2","PTN","VMP1","SEPP1","JUN","GPX3","PLTP","CRISPLD2",
+  "GGT5","FOS","LGALS3BP","ADH1B","RND3","LSP1","PLEKHH2","CALD1","PROCR",
+  "LRP1","COL6A1","COL1A1","RARRES2","COL14A1","QSOX1","PPP1R14A",
+  "RP1-186E20.2","PLPP3","TFPI2","RHOBTB3","MMP2","VCAM1","CTSK","PLAC9",
+  "NOVA1","TGFBI","PLPP1","C11orf96","FBLN5","SERPINF1","FHL1","EMID1",
+  "IL6ST","PITX1","RARRES3","EGR1","FILIP1L","APOC1","ZFP36L1","PTGDS",
+  "CLEC11A","COL5A1","SPON2","MAPK10","FHL2","PMP22","ZFP36L2","BMP4","BASP1",
+  "FXYD1","RPS12","GSN","HAAO","RGS10","SMPDL3A","ADAMDEC1","APOE","ADAM28",
+  "A2M","ABCA8","CTSC","HAPLN1","CCL2","TCF21","EDIL3","CCL13","FABP5",
+  "CCL8","MATN2","RBP1","STMN2","CXCL14","CCL11","RP11-805I24.2","BTG1",
+  "CFH","TMEM176B","CEBPD","CYGB","FOS","TMEM176A","TM4SF1","PPP1R14A",
+  "LTBP4","MFAP4","EMILIN1","RPS7","PLPP1","VMP1","ZFP36","JUN","SEPP1",
+  "RP1-186E20.2","SCARA5","HNRNPA1","CFD","VCAM1","SPARCL1","MALAT1","GGT5",
+  "COL15A1","C1S","IL6ST","PLEKHH2","PLPP3","TFPI2","RPS12","PTN","APOC1",
+  "JUNB","RPL13A","FABP4","COL18A1","GNG11","RND3","RPL21","GPX3","HAAO",
+  "IGHA1","COX7C","RPLP2","IGFBP7","RHOB","H3F3B","RPL7","P2RY14","GLTSCR2",
+  "MEG3","EGR1","MT-ND1","EEF1D","C8orf4","MT-CO1","PTGER4","IGKC","VIM",
+  "MT-ND2","CHL1","MAPK10","RPS27A","CRISPLD2","EMID1","NID1","NOVA1",
+  "RARRES3","PDK4","ACVRL1","PROCR","CRYBG3","GSN","SPRY1","CIRBP","SAMHD1",
+  "RPL3","RPS16"
+)
+
+# cS26 (Myofibro)
+cS26_Pelka <- c(
+  "TAGLN","MYLK","MYH11","TPM2","ACTG2","TPM1","ACTA2","MYL9","DSTN","MYL6",
+  "LPP","CNN1","FLNA","RP3-412A9.11","SYNPO2","DES","CALD1","PDLIM3","CSRP1",
+  "ACTB","PLN","LMOD1","LTBP1","ACTN1","NDUFA4","SLMAP","PALLD","PDLIM7",
+  "MIR143HG","HSD17B6","FHL1","NEXN","SMTN","PPP1R12B","WFDC1","FILIP1L",
+  "KCNMB1","TGFB1I1","COL3A1","TIMP2","HHIP","C1S","CKB","KANK2","EMILIN1",
+  "NBL1","CRYAB","MT-RNR1","RGS2","LGALS1","TUBA1A","MT-ATP6","MSRB3",
+  "SORBS1","NPNT","SOSTDC1","TCEAL4","MT-RNR2","SH3BGRL","CES1","ITM2C",
+  "PCDH7","MFAP4","ILK","SVIL","LUM","PPP1R14A","PRUNE2","PLEKHO1","NUPR1",
+  "ITGB1","VCL","MYOCD","CCDC107","MT-CO3","MRVI1","EDIL3","SGCA","C1R",
+  "MT-ND3","FBXO32","FERMT2","TES","RBPMS","FN1","TNC","C9orf3","COL1A2",
+  "ALDH1B1","TLN1","IGFBP5","CFL2","AKAP12","AOC3","DDR2","COL1A1","ANTXR1",
+  "MRGPRF","SAMD11","RAMP1","TAGLN","MYH11","MYL9","ACTA2","MYLK","DSTN",
+  "ACTG2","TPM2","MYL6","TPM1","CNN1","FLNA","LPP","ACTB","SYNPO2","DES",
+  "PLN","CSRP1","PDLIM3","LMOD1","ACTN1","RP3-412A9.11","SLMAP","LTBP1",
+  "PPP1R12B","NDUFA4","MIR143HG","KCNMB1","CALD1","SEPW1","PDLIM7","HSD17B6",
+  "SMTN","NPNT","RGS5","TGFB1I1","SH3BGRL","MSRB3","HHIP","WFDC1","SORBS1",
+  "CKB","CSRP2","HSPB1","ACTN4","ITGB1","PLEKHO1","TCEAL4","SOSTDC1",
+  "COL4A2","NEXN","MT-RNR1","PRUNE2","SVIL","KANK2","CRYAB","MYOCD",
+  "MT-ATP6","TES","PPP1R14A","PALLD","ILK","PTMS","MT-RNR2","VCL","PAWR",
+  "CCDC107","C9orf3","PPP1R12A","AOC3","RBPMS","CFL2","TUBA1A","TPM4","FHL1",
+  "SGCA","MT-CO3","FILIP1L","MRVI1","WDR1","TLN1","CLIC4","CAV1","RGS2",
+  "SPARCL1","FERMT2","LIMS2","PTMA","ALDH1B1","MT-CYB","FBXO32","GBP2","CD9",
+  "KCNMA1","SYNM","DMD","PFN1","MINOS1","NRP2","TNS1"
+)
+
+# cS27 (CXCL14+ CAF)
+cS27_Pelka <- c(
+  "CXCL14","RARRES2","IGFBP7","VCAN","PDPN","CTSK","F3","CXCL14","PALLD",
+  "COL3A1","COL1A1","CTSC","TMEM176A","TMEM176B","EMILIN1","LUM","COL1A2",
+  "COL5A1","INHBA","FHL2","AGT","COL12A1","SPON2","TIMP1","F2R","COL6A3",
+  "PDGFRA","NBL1","F2R","SERPINF1","C1S","C1R","CDH11","TPM2","EMID1","BMP4",
+  "MMP11","PCOLCE","MFAP2","COL6A1","COL5A2","WNT5A","PCDH18","LGALS1",
+  "EFEMP2","SULF1","TGM2","PALLD","DKK3","FENDRR","AGT","LGALS3BP","MMP11",
+  "DCN","THY1","ALDH1A3","PTCH1","CISD1","CALD1","PPIB","RBP1","PROCR",
+  "NSG1","CISD1","CTSC","PTMA","TMEM98","PAG1","MDK","MEST","MEST","SPATS2L",
+  "FHL2","SDC2","TMEM158","MEG3","FOXF1","CLEC11A","FILIP1L","MXRA5",
+  "PDPN","TMSB10","ST5","PPP1R14A","MXRA8","INHBA","MDK","C2","MMP2","AEBP1",
+  "PITX1","RARRES3","TSPAN33","TPM2","TGFBI","ISLR","ANTXR1","RUNX1",
+  "PDGFC","EMID1","EDIL3","PAG1","PPP1R14A","IGFBP7","SOX4","SEPT11","FBLN1",
+  "PLAT","F3","GPC1","MARCKSL1","CH25H","WARS","CNN2","VCAN","COL6A2",
+  "PLOD2","TGM2","PLAU","RGS10","ITM2C","SOX4","CARD16","MYL12A","LSAMP",
+  "BICC1","FARP1","TCF4","CFL1","PDLIM1","SPATS2L","DKK3","ALDH1A3","NSG1",
+  "SERPINH1","COL12A1","RBP1","CH25H","C9orf16","SULF1","MYH9","TSPAN33",
+  "RARRES2","RCN2","MFAP2","PCDH18","C4orf48","NDUFA4","PTCH1","POMP",
+  "WNT5A","CNN2","LGALS1","ZEB1","CDH11","CALD1","MYLK","PSMB9","C9orf3",
+  "WNT4","COL5A1","CYTOR","SULF2","MRVI1","WNT2","CAV2","FBLIM1","PDGFC",
+  "CHCHD10","ITGA1","GPC1","SPARC","HSPE1","BMP4","TAGLN","TPM4","ATP2B1",
+  "TMEM158","PSME2","CALM1","ID3","PLAU","FENDRR","LIMS1","SERTAD4-AS1",
+  "RPS19","PMEPA1","CALR","ETS2","LEF1","ISG15","ADAM19","F2RL2","FARP1",
+  "ST5","TGFB1","DLL1","THY1","HSPA8","H3F3A"
+)
+
+# cS28 (GREM1+ CAF)
+cS28_Pelka <- c(
+  "COL1A1","COL3A1","COL1A2","CTHRC1","COL5A2","BGN","LUM","THBS2","COL12A1",
+  "COL6A3","POSTN","INHBA","ANTXR1","SPON2","AEBP1","COL5A1","PDPN","FTH1",
+  "SULF1","MXRA5","FAP","MMP14","RARRES2","RAB31","DCN","MMP2","LGALS1",
+  "PRRX1","GREM1","TPM2","COL6A1","CTSB","FN1","CTSK","RP3-412A9.11","MFAP2",
+  "SOD2","CALU","CDH11","TNC","VCAN","PCOLCE","COL11A1","ADAMTS2","TIMP2",
+  "PLOD2","EMILIN1","TNFAIP6","STEAP1","ADAM12","THY1","COL7A1","TWIST1",
+  "TNFRSF12A","BASP1","FTL","COL10A1","TGFBI","RCN3","WNT5A","COL6A2","NBL1",
+  "MXRA8","WISP1","TMEM158","CLMP","SLC16A3","BICC1","PODNL1","C1S","TPM1",
+  "PALLD","STEAP2","PKM","CEBPB","ISLR","SPHK1","CHPF","SERPINH1","CALD1",
+  "FKBP10","P4HB","MMP1","NTM","MRC2","GAS1","CERCAM","SPOCK1","RUNX1",
+  "SPARC","DDR2","PTK7","ARF4","COL8A1","CLEC11A","FAM20C","FSTL1","MT1E",
+  "OSTC","CD82","CTHRC1","COL1A1","BGN","COL3A1","COL5A2","COL1A2","FAP",
+  "RAB31","INHBA","POSTN","COL12A1","THBS2","SPARC","SULF1","PRRX1","COL11A1",
+  "SPHK1","TPM4","ADAM12","ANTXR1","LGALS1","TNC","COL10A1","SLC16A3","IL32",
+  "MMP14","TPM2","SERPINH1","CTSB","GAPDH","GREM1","ADAMTS2","COL7A1",
+  "TWIST1","TNFRSF12A","SOD2","HIF1A","FTH1","CALU","LMCD1","WISP1","PDPN",
+  "TMSB10","TNFAIP6","MYH9","FN1","MMP1","PODNL1","RAI14","STEAP1","COL5A1",
+  "PLOD2","MXRA5","ACTN1","MFAP2","NTM","SULF2","ITGB1","MT1E","PKM",
+  "COL6A3","TAGLN","NRP2","RP3-412A9.11","BMP1","SLC39A14","PTMA","SPOCK1",
+  "P4HB","RP11-400N13.3","EVA1A","LTBP1","PRELID1","SSR3","ARL4C","AEBP1",
+  "MARCKS","ITGAV","CLIC4","LOXL2","STEAP2","ADAMTS12","RAB13","KDELR2",
+  "TMEM158","GUCY1A3","CHPF","GAS1","MICAL2","GJB2","OSTC","PTK7","PDGFRB",
+  "COTL1","IER3","PLPP4","BCAT1","CCND1","SOX4","CD82"
+)
+
+# cS29 (MMP3+ CAF)
+cS29_Pelka <- c(
+  "FTH1","MT2A","SOD2","GAPDH","FTL","CXCL8","CEBPB","TPI1","MT1E","IER3",
+  "ENO1","PKM","CD44","NAMPT","COL7A1","TGFBI","LDHA","MMP1","SAT1",
+  "RP3-412A9.11","WNT5A","PHLDA1","SLC16A3","MMP3","INHBA","CXCL1","SEC61G",
+  "TMEM158","CD82","LGALS1","MT1X","LOXL2","BNIP3","F3","TMEM132A","MIF",
+  "TIMP1","CHI3L1","COL3A1","TNC","TNFRSF12A","COL12A1","PGK1","ANGPTL4",
+  "PLOD2","GLRX","ADM","FAM20C","BNIP3L","PDPN","DCN","RPL28","GSTO1","LUM",
+  "VEGFA","COL1A1","CXCL5","TMEM45A","TPM2","ERRFI1","PLIN2","SPON2",
+  "IL24","COL5A2","PRRX1","ACSL4","MME","ANXA5","SLC39A14","HILPDA","PLAUR",
+  "CA12","RUNX1","IL11","P4HB","AKR1B1","STC1","G0S2","MMP14","CXCL3",
+  "PGAM1","NNMT","RND3","NBL1","OAZ1","TNFAIP3","RPLP0","HIF1A","CTSB",
+  "TNFAIP6","COL6A3","PDLIM4","TNIP1","RCN3","GK","S100A6","NINJ1","COL6A1",
+  "AXL","VMP1","MT2A","GAPDH","FTH1","SOD2","CXCL8","TPI1","NAMPT","MT1E",
+  "ENO1","IER3","PTMA","LDHA","PKM","SAT1","SLC16A3","CD44","STC1","MT1X",
+  "COL7A1","SEC61G","MMP1","MIF","BNIP3","PGK1","MMP3","TMEM132A","CEBPB",
+  "RAB13","PHLDA1","GSTO1","LOXL2","CD82","FTL","HIF1A","CXCL1","IL32",
+  "ITGA5","ANGPTL4","CHI3L1","GLRX","DDIT4","TNIP1","WNT5A","IL24","CYTOR",
+  "TMEM158","INHBA","CXCL5","RPL28","TGFBI","CXCL3","TNC","IL11","BNIP3L",
+  "HILPDA","PLIN2","ACSL4","LRRFIP1","SLC39A14","TNFRSF12A","AP2S1","POMP",
+  "SERPINE1","NDRG1","PGAM1","TNFAIP3","UPP1","PLAUR","MME","RP3-412A9.11",
+  "NINJ1","CAV1","FADS3","ERO1A","ADM","VDAC1","GK","MT1F","HMGA1","PLOD2",
+  "RPS19","COX7A2","PHLDA2","COTL1","OAZ1","KLHL5","C4orf3","VEGFA",
+  "S100A11","WTAP","PTGS1","PDLIM4","PFKFB3","CA12","FAM20C","IL6","ERRFI1",
+  "ZC3H12A","G0S2","LGALS1"
+)
+
+# cS30 (CAF CCL8 Fibro-like)
+cS30_Pelka <- c(
+  "TFPI2","CCL11","ADAMDEC1","IGFBP5","ADAM28","TCF21","PTGDS","CCL13",
+  "TGFBI","HAPLN1","VCAN","CFD","FBLN1","RP1-186E20.2","LUM","CTSK","COL18A1",
+  "C1S","TIMP3","ADH1B","PLTP","EMILIN1","SCARA5","DCN","LTBP4","FHL2",
+  "QSOX1","COL14A1","CFH","TMEM176B","ECM1","SERPINE2","WNT2B","RARRES2",
+  "EDIL3","TMEM176A","C11orf96","RHOBTB3","CXCL14","CCL2","DKK3","CYGB",
+  "NEGR1","RP11-805I24.2","PAPPA","IGF1","RND3","CTSC","COL1A2","SERPINF1",
+  "C1R","SPON2","MFAP4","CCDC80","COL6A1","MRC2","IL6ST","SFRP1","LRP1",
+  "ZFP36L1","BASP1","MEG3","MXRA5","JUND","A2M","GPC6","BMP4","DPT","ZEB2",
+  "FILIP1L","HTRA3","COL3A1","FBLN5","SPON1","PITX1","GRK5","COL6A2","EDNRB",
+  "APOE","AKAP12","CST3","COL5A1","FIBIN","SMPDL3A","CDH11","RBP1","TFPI",
+  "PMP22","FOSB","ENC1","GGT5","LTBP2","NFIA","MMP2","ABCA8","PTGER4",
+  "ROBO1","TYMP","RRBP1","CXCL1","TFPI2","CCL11","COL18A1","IGFBP5","ADAMDEC1",
+  "ADAM28","CCL13","HAPLN1","RP1-186E20.2","TCF21","SPARCL1","GNG11","PTGDS",
+  "TIMP3","A2M","TGFBI","FABP5","CCL2","FHL2","GRK5","SPRY1","WNT2B","EDIL3",
+  "VCAN","C11orf96","IL6ST","PAPPA","SPTBN1","DKK3","QSOX1","JUND","SCARA5",
+  "ACVRL1","FOSB","BTG1","NEGR1","PLPP1","CFH","COL15A1","VIM","PLTP",
+  "COL14A1","SERPINE2","EPAS1","RND3","MT-ND1","ZEB2","ADH1B","ADGRL2",
+  "IGF1","NFIA","FAM198B","PTGER4","AKAP12","ZFP36L1","ROBO1","RP11-805I24.2",
+  "NID1","CLEC2B","ENC1","CRYBG3","CTSC","LTBP4","TNFSF10","EMILIN1","CYGB",
+  "MT-CO3","ECM1","HGF","TGFBR2","FGFR4","P2RY14","TSPAN2","MT-CO1","MT-CO2",
+  "VCAM1","DDX5","FIBIN","TFPI","RBP1","MATN2","LTBP2","TRIL","EDNRB",
+  "MT-ATP6","MCL1","PHACTR2","RHOBTB3","GPC6","CYR61","CTSK","DUSP6",
+  "SPON1","MAMDC2","NDUFA4L2","GGT5","RP1-288H2.5","RBP5","C8orf4","CHL1"
+)
+
+# cS31 (CAF stem niche Fibro-like)
+cS31_Pelka <- c(
+  "CCDC80","C3","SFRP2","IGF1","COL6A3","SERPINF1","FBLN1","IGFBP4","MGP","DCN",
+  "VCAN","COL14A1","OGN","COL1A2","LUM","LRP1","SPON1","GPNMB","C1S","PCOLCE",
+  "RARRES1","MMP2","COL3A1","FBN1","C1R","MGST1","CTSK","COL1A1","SLIT3",
+  "HSPB6","SRPX","EFEMP1","PLA2G2A","STEAP1","PODN","ELN","DPT","THBS2",
+  "CFD","THY1","OLFML3","STEAP2","FGF7","AEBP1","PTGDS","RHOBTB3","MEG3",
+  "PLTP","PDGFRA","CYBRD1","MRC2","ANK2","COL6A1","CHRDL1","TSHZ2","CD63",
+  "TIMP2","MFAP4","MMP23B","BASP1","PRELP","SSPN","OAF","SFRP1","BOC",
+  "CD248","SPON2","VEGFB","FSTL1","CLMP","TIMP1","NFIX","SERPING1","SVEP1",
+  "CST3","COL6A2","PBX1","MXRA8","SERPINE2","LGALS3BP","TNXB","NNMT","COL8A1",
+  "C1QTNF3","CFH","CLEC11A","PTGIS","FMOD","NUPR1","SCPEP1","SFRP4","PMP22",
+  "ABI3BP","FBLN5","PLXDC2","AKR1C1","CXCL12","GREM1","ADD3","PBX3","IGFBP4",
+  "IGF1","SFRP2","C3","MGP","RARRES1","CCDC80","COL6A3","PLA2G2A","HSPB6",
+  "SPON1","SRPX","COL14A1","ELN","SLIT3","OGN","EMP1","SERPINF1","TSHZ2",
+  "STEAP1","ANK2","LXN","GPNMB","STEAP2","NFIB","CHRDL1","PODN","BOC","MGST1",
+  "FBN1","OAF","THY1","CLU","PTGDS","NT5E","SFRP4","VEGFB","VCAN","C7",
+  "FAM198B","EFEMP1","PBX3","MEDAG","LRP1","FBLN1","AKR1C1","NFIX","AKR1C3",
+  "MAPKAP1","LMNA","COL1A2","PRELP","THBS2","DPT","NR4A1","PTGIS","ABL2",
+  "EBF1","DPYSL3","PDGFRL","CPXM1","MT-RNR2","PBX1","SVEP1","CD248","PCOLCE",
+  "TGFBR2","AOX1","NFIA","GREM1","FGF7","UGP2","SPARCL1","BGN","ABI3BP",
+  "DPYSL2","MMP23B","SH3D19","FKBP5","FMOD","ANGPTL1","MIR99AHG","CXCL12",
+  "GPRC5A","ANGPTL4","HTRA1","MDK","COLEC12","SFRP1","SH3BP5","BASP1",
+  "C1QTNF3","COL8A1","MYCBP2","COL1A1","DCLK1","AKAP12","DAAM1","FOSB",
+  "FSTL1"
+)
+cS21_Pelka <- cS21_Pelka[1:30]
+cS23_Pelka <- cS23_Pelka[1:30]
+cS25_Pelka <- cS25_Pelka[1:30]
+cS26_Pelka <- cS26_Pelka[1:30]
+cS27_Pelka <- cS27_Pelka[1:30]
+cS28_Pelka <- cS28_Pelka[1:30]
+cS29_Pelka <- cS29_Pelka[1:30]
+cS30_Pelka <- cS30_Pelka[1:30]
+cS31_Pelka <- cS31_Pelka[1:30]
+
+
+## Qian et al.
+
+C1_KCNN3_Qian <- c(
+  "DPT","CCL11","THBS4","LY6H","KCNN3","C7","MGP","P2RY1","PID1","GSN",
+  "SCN7A","ADH1B","OGN","RAMP1","C1QTNF3","CXCL12","CHODL","SPRY2","SPRY1",
+  "JAM2","TAC1","TSHZ2","MBP","MATN2","GUCY1A3","SNCA","SRPX","PDGFRA","DCN",
+  "NFIA","SDC2","SPARCL1","LUM","ADAMTSL3","SCUBE2","SSPN","MARCKS","FBLN1",
+  "ASPN","FNDC1"
+)
+
+C2_ADAMDEC1_Qian <- c(
+  "ADAMDEC1","CCL13","CCL8","CXCL14","APOE","CTSC","STMN2","ADAM28","HAPLN1",
+  "LINC01082","EDIL3","FABP5","CFD","ABCA8","CCL11","TMEM176B","SFTA1P",
+  "TCF21","SCARA5","TMEM176A","CP","A2M","CCL2","C8orf4","CXCL1","PTCH1",
+  "TAC3","RND3","RP11-160E2.6","CMIP","LSP1","CYGB","WNT2B","PLPP3","ADGRL3",
+  "PTN","PITX1","CEBPD","IL6ST","LTBP4"
+)
+
+C3_SOX6_Qian <- c(
+  "CXCL14","F3","TRPA1","HSD17B2","PLAT","PDGFRA","ENHO","NSG1","SOX6","VSTM2A",
+  "FENDRR","BMP4","EDNRB","BMP5","AGT","NRG1","FOXF1","DMKN","PTCH1","RGS10",
+  "TMEM176B","EMID1","CXCR4","POSTN","F2R","INSC","PITX1","TMEM119","PTPRE",
+  "FAM150B","DDHD1","TMEM176A","WNT5A","APLP2","DLL1","ETS2","PDLIM1","PCSK6",
+  "GADD45G","PDGFD"
+)
+
+C4_STAR_NF_Qian <- c(
+  "RBP1","SPRR2F","RPL41","RPL39","FHL2","STAR","HNRNPA1","MDK","PEG3","EEF1A1",
+  "MARCKSL1","ST13","TCEAL4","EPB41L4A-AS1","BST2","C6orf48","SNHG8","KLHDC8A",
+  "MAG","SIGLEC11","HS3ST1","ACSM3","ZFAS1","MIR202HG","GSTM5","WFIKKN2",
+  "RPL17","GATM","TM7SF2","IGFBP5","STMN1","HMGN2","SPINT2","RNASE1","ARX",
+  "SNHG19","CD22","GREB1","AC090498.1","H3F3A"
+)
+
+C5_STAR_CAF_Qian <- c(
+  "STAR","MEG3","FHL2","AVPI1","PRPS2","ZNF331","CREM","ZFAND5","RBP1","IGFBP5",
+  "PEG3","ST13","BST2","RPS26","DLK1","MARCKSL1","ITM2A","NR4A2","HS3ST1",
+  "GREB1","HSP90AB1","CIRBP","HERPUD1","MDK","SELK","MUM1L1","AKAP12",
+  "LINC00473","RSL1D1","WFIKKN2","EIF4A2","ATP1B3","IQCG","NGFRAP1","ZNF593",
+  "ECEL1","C6orf48","RASL11B","RBBP7","RAB3A"
+)
+
+C6_CALB2_Qian <- c(
+  "ITLN1","HP","SLPI","PLA2G2A","KRT18","MSLN","UPK3B","TM4SF1","CALB2","KRT19",
+  "PRG4","GAS1","TFPI2","RARRES1","CLDN1","MT1E","SAT1","KRT8","KLK11","BCHE",
+  "C3","SLC39A8","CLDN15","C19orf33","PROCR","EZR","ANXA3","AADAC","S100A10",
+  "PDZK1IP1","TPD52L1","SGOL2","SBSPON","IL18","PODXL","DPYS","MST1","CXADR",
+  "VTN","CLIC5"
+)
+
+C7_MYH11_Qian <- c(
+  "MYH11","ADIRF","PLN","TAGLN","RERGL","MYL9","ACTG2","DSTN","ACTA2","BCAM",
+  "SNCG","TPM2","SORBS2","CSRP2","PPP1R14A","CNN1","CSRP1","C2orf40","TINAGL1",
+  "TSC22D1","C12orf75","MCAM","LMOD1","MYLK","FLNA","CRIP2","PTP4A3","CRYAB",
+  "TPM1","CAV2","CAV1","NTRK2","RCAN2","SH3BGRL","KCNMB1","KCNA5","NRGN",
+  "FHL5","NTRK3","CASQ2"
+)
+
+C9_CFD_Qian <- c(
+  "CFD","APOD","MFAP5","GSN","PI16","IGFBP6","GPX3","MGP","FBLN1","DCN",
+  "TNXB","SFRP2","PLAC9","MFAP4","FBLN2","SRPX","PCOLCE2","MGST1","ADH1B",
+  "FBLN5","GPNMB","FBN1","GPC3","DPT","EFEMP1","SFRP1","CCDC80","SVEP1",
+  "S100A4","PRELP","FSTL1","PLPP3","C1R","ITM2A","SERPINF1","WISP2","LTBP4",
+  "LUM","CXCL12","CLU"
+)
+
+C10_COMP_Qian <- c(
+  "CTHRC1","COMP","FN1","MMP11","COL1A1","POSTN","COL3A1","COL1A2","COL11A1",
+  "VCAN","COL5A2","INHBA","SPARC","COL10A1","COL5A1","THBS2","SFRP4","BGN",
+  "SULF1","PLAU","MMP14","TGFBI","AEBP1","FAP","HOPX","COL6A3","COL8A1",
+  "COL12A1","CTSB","ANTXR1","SERPINH1","CTSK","RAB31","THY1","SFRP2","RCN3",
+  "CDH11","GJB2","P4HB","MXRA5"
+)
+
+C11_SERPINE1_Qian <- c(
+  "COL1A1","MEST","C3","CLDN1","EGFL6","LXN","KLF6","COL3A1","RARRES1","APOE",
+  "PTGIS","COL1A2","SERPINE1","CPXM1","SAT1","SERINC5","SLC12A8","ANKRD28",
+  "CRABP2","WT1","CFI","SPARC","IGF1","DES","ALDH1A3","ABL2","IGFBP2","KRT8",
+  "RGS4","ANGPTL4","CCDC80","MT1E","OSR1","PTGDS","NNMT","ATF3","ERRFI1",
+  "DCBLD2","NFATC2","CYR61"
+)
+
+custom_pathways <- list(
+  # Kieffer et al.
+  "IL-iCAF"     = IL_iCAF_Kieffer,
+  "IFNr-iCAF"   = IFNr_iCAF_Kieffer,
+  "ecm-myCAF"   = ecm_myCAF_Kieffer,
+  "TGFb-myCAF"  = TGFb_myCAF_Kieffer,
+  "wound-myCAF" = wound_myCAF_Kieffer,
+  "detox-iCAF"  = detox_iCAF_Kieffer,
+
+  # Elyada et al.
+  "apCAF"  = apCAF_Elyada,
+  "iCAF"   = iCAF_Elyada,
+  "myCAF"  = myCAF_Elyada,
+
+  # Pelka et al.
+  "cS21(Fibro stem cell niche)"= cS21_Pelka,
+  "cS23(Fibro BMP-producing)"= cS23_Pelka,
+  "cS25(Fibro CCL8+)"= cS25_Pelka,
+  "cS26(Myofibro)"= cS26_Pelka,
+  "cS27(CXCL14+ CAF)"= cS27_Pelka,
+  "cS28(GREM1+ CAF)"= cS28_Pelka,
+  "cS29(MMP3+ CAF)"= cS29_Pelka,
+  "cS30(CAF CCL8 Fibro-like)"= cS30_Pelka,
+  "cS31(CAF stem niche Fibro-like)"= cS31_Pelka,
+
+  # Qian et al.
+  "C1_KCNN3"      = C1_KCNN3_Qian,
+  "C2_ADAMDEC1"   = C2_ADAMDEC1_Qian,
+  "C3_SOX6"       = C3_SOX6_Qian,
+  "C4_STAR_NF"    = C4_STAR_NF_Qian,
+  "C5_STAR_CAF"   = C5_STAR_CAF_Qian,
+  "C6_CALB2"      = C6_CALB2_Qian,
+  "C7_MYH11"      = C7_MYH11_Qian,
+  "C9_CFD"        = C9_CFD_Qian,
+  "C10_COMP"      = C10_COMP_Qian,
+  "C11_SERPINE1"  = C11_SERPINE1_Qian
+)
+
+custom_pathways
+
+obj <- readRDS("~/Primarytumor/Fibroblast_addmarkers.RDS")
+
+Idents(obj) <- "cell_type"
+
+cluster_list <- c("iCAF", "myCAF", "SOX6+Fib", "ADAMDEC1+Fib")
+obj <- subset(obj, idents = cluster_list)
+
+gsea_list <- list()
+
+for(clust in cluster_list) {
+  deg_res <- FindMarkers(
+    object  = obj,
+    ident.1 = clust,
+    group.by = "cell_type",
+    logfc.threshold = 0,
+    min.pct = 0,
+    only.pos = FALSE
+  )
+  
+  fold_changes <- deg_res$avg_log2FC
+  names(fold_changes) <- rownames(deg_res)
+  fold_changes <- sort(fold_changes, decreasing = TRUE)
+
+  # Run GSEA
+  gsea_res <- GSEA(
+    geneList = fold_changes,
+    TERM2GENE = stack(custom_pathways)[, 2:1],  # pathway名→gene名 の形式
+    minGSSize = 3,
+    maxGSSize = 500,
+    pvalueCutoff = 1
+  )
+  
+  gsea_df <- as.data.frame(gsea_res)
+  gsea_df$cluster <- clust
+  gsea_list[[clust]] <- gsea_df
+}
+
+gsea_all <- do.call(rbind, gsea_list)
+
+gsea_for_heatmap <- gsea_all %>%
+  dplyr::select(ID, cluster, NES) %>%
+  pivot_wider(names_from = cluster, values_from = NES)
+
+mat <- as.matrix(gsea_for_heatmap[ , -1])            
+rownames(mat) <- gsea_for_heatmap$ID
+
+row_has_na <- apply(mat, 1, function(x) any(is.na(x)))
+mat <- mat[!row_has_na, ]
+
+mat_t <- t(mat)
+
+my_row_order <- c("iCAF", "myCAF", "SOX6+Fib", "ADAMDEC1+Fib")
+mat_t_ordered <- mat_t[my_row_order, , drop=FALSE]
+
+my_col_order <- c(
+  #######################
+  # 1) Kieffer et al.
+  #######################
+  "IL-iCAF",
+  "IFNr-iCAF",
+  "detox-iCAF",
+  "ecm-myCAF",
+  "TGFb-myCAF",
+  "wound-myCAF",
+  
+  #######################
+  # 2) Elyada et al.
+  #######################
+  "apCAF",
+  "iCAF",
+  "myCAF",
+  
+  #######################
+  # 3) Pelka et al.
+  #######################
+  "cS21(Fibro stem cell niche)",
+  "cS23(Fibro BMP-producing)",
+  "cS25(Fibro CCL8+)",
+  "cS26(Myofibro)",
+  "cS27(CXCL14+ CAF)",
+  "cS28(GREM1+ CAF)",
+  "cS29(MMP3+ CAF)",
+  "cS30(CAF CCL8 Fibro-like)",
+  "cS31(CAF stem niche Fibro-like)",
+  
+  #######################
+  # 4) Qian et al.
+  #######################
+  "C1_KCNN3",
+  "C2_ADAMDEC1",
+  "C3_SOX6",
+  "C4_STAR_NF",
+  "C5_STAR_CAF",
+  "C6_CALB2",
+  "C7_MYH11",
+  "C9_CFD",
+  "C10_COMP",
+  "C11_SERPINE1"
+)
+
+mat_t_ordered <- mat[my_col_order, , drop = FALSE]
+
+pheatmap(
+  mat_t_ordered,
+  scale = "none",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  clustering_method = "ward.D2",
+  border_color = NA,
+  cellwidth = 13,
+  cellheight = 13
+) #Fig4C
+```
+
+# CellChat analysis including detailed CAF subtypes: Fig4E
+```{r}
+set.seed(123)
+
+sc <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+sc$cellchat <- "NA"
+
+obj <- readRDS("~/Primarytumor/tumor_integrated_LR.RDS")
+cancer_cells <- colnames(obj) 
+sc$cellchat[cancer_cells] <- "cancer cell"
+
+CAF <- readRDS("~/Fibroblast_addmarkers.RDS")
+CAF_cells <- CAF@meta.data[["cell_type"]]
+
+myCAF_cells <- colnames(CAF)[CAF_cells == "myCAF"]
+iCAF_cells <- colnames(CAF)[CAF_cells == "iCAF"]
+apCAF_cells <- colnames(CAF)[CAF_cells == "apCAF"]
+SOX6_POSTN_CAF_cells <- colnames(CAF)[CAF_cells == "SOX6+Fib"]
+CXCL14_ADAMDEC1_CAF_cells <- colnames(CAF)[CAF_cells == "ADAMDEC1+Fib"]
+Pericyte_cells <- colnames(CAF)[CAF_cells == "Pericyte"]
+SMC_cells <- colnames(CAF)[CAF_cells == "SMC"]
+
+sc$cellchat[myCAF_cells] <- "myCAF"
+sc$cellchat[iCAF_cells] <- "iCAF"
+sc$cellchat[apCAF_cells] <- "apCAF"
+sc$cellchat[SOX6_POSTN_CAF_cells] <- "SOX6+Fib"
+sc$cellchat[CXCL14_ADAMDEC1_CAF_cells] <- "ADAMDEC1+Fib"
+sc$cellchat[Pericyte_cells] <- "Pericyte"
+sc$cellchat[SMC_cells] <- "SMC"
+
+Idents(sc) <- "cellchat"
+
+sc@active.ident <- factor(sc@active.ident, levels = c(
+  "cancer cell", 
+  "myCAF", 
+  "iCAF", 
+  "apCAF", 
+  "SOX6+Fib", 
+  "ADAMDEC1+Fib", 
+  "Pericyte", 
+  "SMC"
+))
+
+sc <- subset(sc, subset = cellchat %in% c(
+  "cancer cell", 
+  "myCAF", 
+  "iCAF", 
+  "apCAF", 
+  "SOX6+Fib", 
+  "ADAMDEC1+Fib", 
+  "Pericyte", 
+  "SMC"
+))
+
+data.input <- sc[["RNA"]]$data # normalized data
+labels <- Idents(sc)
+meta <- data.frame(labels = labels, row.names = names(labels))
+
+cellChat <- createCellChat(object = data.input, meta  = meta, group.by = "labels")
+
+cellChat <- createCellChat(object = sc, group.by = "ident", assay = "RNA")
+# Ligand-receptor interactions in CellChat database for human
+CellChatDB <- CellChatDB.human
+
+showDatabaseCategory(CellChatDB)
+
+# Subset CellChatDB databse by only including interactions of interest
+CellChatDB.use <- subsetDB(CellChatDB)
+
+# set DB
+cellChat@DB <- CellChatDB.use
+
+# Subset the expression data of signaling genes for saving computation cost
+# update object@data.signaling
+cellChat <- subsetData(cellChat)
+
+future::plan("multisession", workers = 4)
+options(future.globals.maxSize = 20 * 1024^3) 
+
+# Identify over-expressed signaling genes associated with each cell group
+# return object@var.features
+
+cellChat <- identifyOverExpressedGenes(cellChat)
+
+# Identify over-expressed ligand-receptor interactions (pairs) within the used CellChatDB
+# return object@LR$LRsig
+cellChat <- identifyOverExpressedInteractions(cellChat)
+
+# To further speed up on large-scale datasets, USER can downsample the data using the function 'subset' from Seurat package (e.g., pbmc.small <- subset(pbmc, downsample = 500)), or using the function 'sketchData' from CellChat, in particular for the large cell clusters;
+# return object@net$prob
+cellChat <- computeCommunProb(cellChat, type = "triMean")
+
+# Filter cell-cell communication if there are only few number of cells in certain cell groups
+# update object@net
+cellChat <- filterCommunication(cellChat, min.cells = 20)
+
+# Compute the communication probability on signaling pathway level by summarizing all related ligands/receptors
+# return object@netP
+cellChat <- computeCommunProbPathway(cellChat)
+
+# Calculate the aggregated network by counting the number of links or summarizing the communication probability
+# return object@net$count, object@net$weight, object@net$sum
+cellChat <- aggregateNet(cellChat)
+
+groupSize <- as.numeric(table(cellChat@idents))
+par(mfrow = c(1,2), xpd=TRUE)
+
+netVisual_circle(cellChat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+netVisual_circle(cellChat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+
+cellChat <- netAnalysis_computeCentrality(cellChat, slot.name = "netP")
+
+pathways.show <- c("EGF") 
+# Hierarchy plot
+vertex.receiver = seq(1,4) # a numeric vector. 
+netVisual_aggregate(cellChat, signaling = pathways.show,  vertex.receiver = vertex.receiver)
+# Circle plot
+netVisual_aggregate(cellChat, signaling = pathways.show, layout = "circle", arrow.size=0.6)
+# Chord diagram
+netVisual_aggregate(cellChat, signaling = pathways.show, layout = "chord") #Fig4E
+# Heatmap
+netVisual_heatmap(cellChat, signaling = pathways.show, color.heatmap = "Reds")
+```
+
+# CIBERSORTx analysis comparing iCAF/myCAF proportions: Fig4C
+##Create signature matrix including detailed CAF subtypes
+```{r}
+sc <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+sc <- subset(sc, condition=="Tumor")
+
+CAF <- readRDS("~/Primarytumor/Fibroblast_addmarkers.RDS")
+
+CAF_cells <- CAF@meta.data[["cell_type"]]
+
+myCAF_cells <- colnames(CAF)[CAF_cells == "myCAF"]
+iCAF_cells <- colnames(CAF)[CAF_cells == "iCAF"]
+apCAF_cells <- colnames(CAF)[CAF_cells == "apCAF"]
+SOX6_Fib_cells <- colnames(CAF)[CAF_cells == "SOX6+Fib"]
+ADAMDEC1_cells <- colnames(CAF)[CAF_cells == "ADAMDEC1+Fib"]
+SMC_cells <- colnames(CAF)[CAF_cells == "SMC"]
+
+sc$cell_type[myCAF_cells] <- "myCAF"
+sc$cell_type[iCAF_cells] <- "iCAF"
+sc$cell_type[apCAF_cells] <- "apCAF"
+sc$cell_type[SOX6_Fib_cells] <- "SOX6+Fib"
+sc$cell_type[ADAMDEC1_cells] <- "ADAMDEC1+Fib"
+sc$cell_type[SMC_cells] <- "SMC"
+
+Idents(sc) <- "cell_type"
+sc.small <- subset(sc,downsample=1000)
+
+sc.small <- subset(sc.small, subset = cell_type %in% c(
+  "B cell", "Endothelial cell", "Epithelial cell", "Myeloid cell", "Plasma cell", "T cell", "myCAF", "iCAF", "apCAF", "SOX6+Fib", "ADAMDEC1+Fib", "SMC"))
+
+table(sc.small@meta.data[["cell_type"]])
+
+sc.small.count <- GetAssayData(object = sc.small, assay = "RNA", layer = "counts")
+
+celltype <- sc.small@meta.data %>% dplyr::select(cell_type) %>% pull(1)
+colnames(sc.small.count) <- celltype
+
+write.table( as.matrix(sc.small.count), file="./signature_matrix1000.tsv", sep="\t" , col.names=NA , row.names=T , quote=F)
+```
+
+
+## Process TCGA clinical information
+```{r}
+COAD <- readRDS("~/Primarytumor/TCGACOAD_rnaseq.RDS")
+READ <- readRDS("~/Primarytumor/TCGAREAD_rnaseq.RDS")
+
+COAD_clinical_info <-  COAD@colData
+READ_clinical_info <-  READ@colData
+merge_clinical_info <- rbind(COAD_clinical_info,READ_clinical_info)
+merge_clinical_info <- merge_clinical_info %>% 
+	data.frame() %>% 
+	rownames_to_column("sampleid") %>% 
+	mutate(sampleid = gsub("-",".",sampleid)) %>%
+       	column_to_rownames("sampleid")
+
+TCGA_COAD_maf <- readRDS("~/Primarytumor/TCGA_COAD_maf.RDS")
+TCGA_READ_maf <- readRDS("~/Primarytumor/TCGA_READ_maf.RDS")
+
+
+KRAS_mut_COAD <- TCGA_COAD_maf %>% 
+  filter(Hugo_Symbol %in%  c("KRAS")) %>% 
+  dplyr::select(Hugo_Symbol,Chromosome,Start_Position,Variant_Classification,Variant_Type,Reference_Allele,Mutation_Status,HGVSp_Short,IMPACT,case_id, Tumor_Sample_Barcode) %>% 
+  data.frame()
+
+KRAS_mut_READ <- TCGA_READ_maf %>%   filter(Hugo_Symbol %in%  c("KRAS")) %>% 
+  dplyr::select(Hugo_Symbol,Chromosome,Start_Position,Variant_Classification,Variant_Type,Reference_Allele,Mutation_Status,HGVSp_Short,IMPACT,case_id, Tumor_Sample_Barcode) %>% 
+  data.frame()
+
+combined_KRAS <- rbind(KRAS_mut_READ, KRAS_mut_COAD)
+
+combined_KRAS$KRAS_mutation <- "mut"
+names(combined_KRAS)[names(combined_KRAS) == "Tumor_Sample_Barcode"] <- "barcode"
+combined_KRAS <- combined_KRAS %>%
+  dplyr::select(c(barcode, KRAS_mutation))
+
+combined_KRAS$barcode <- sapply(strsplit(combined_KRAS$barcode, "-"), function(x) paste(x[1:4], collapse = "-"))
+
+merge_clinical_info$barcode <- sapply(strsplit(merge_clinical_info$barcode, "-"), function(x) paste(x[1:4], collapse = "-"))
+
+merge_clinical_info <- merge(merge_clinical_info, combined_KRAS, by = "barcode", all.x = TRUE)
+
+merge_clinical_info$KRAS_mutation[is.na(merge_clinical_info$KRAS_mutation)] <- "wt"
+
+BRAF_mut_COAD <- TCGA_COAD_maf %>% 
+  filter(Hugo_Symbol %in%  c("BRAF")) %>% 
+  dplyr::select(Hugo_Symbol,Chromosome,Start_Position,Variant_Classification,Variant_Type,Reference_Allele,Mutation_Status,HGVSp_Short,IMPACT,case_id, Tumor_Sample_Barcode) %>% 
+  data.frame()
+
+BRAF_mut_COAD <- filtered_data <- BRAF_mut_COAD[BRAF_mut_COAD$HGVSp_Short == "p.V640E", ]
+
+BRAF_mut_READ <- TCGA_READ_maf %>% 
+  filter(Hugo_Symbol %in%  c("BRAF")) %>% 
+  dplyr::select(Hugo_Symbol,Chromosome,Start_Position,Variant_Classification,Variant_Type,Reference_Allele,Mutation_Status,HGVSp_Short,IMPACT,case_id, Tumor_Sample_Barcode) %>% 
+  data.frame()
+
+BRAF_mut_READ <- filtered_data <- BRAF_mut_READ[BRAF_mut_READ$HGVSp_Short == "p.V640E", ]
+
+combined_BRAF <- rbind(BRAF_mut_READ, BRAF_mut_COAD)
+
+combined_BRAF$BRAF_mutation <- "mut"
+names(combined_BRAF)[names(combined_BRAF) == "Tumor_Sample_Barcode"] <- "barcode"
+combined_BRAF <- combined_BRAF %>%
+  dplyr::select(c(barcode, BRAF_mutation))
+
+combined_BRAF$barcode <- sapply(strsplit(combined_BRAF$barcode, "-"), function(x) paste(x[1:4], collapse = "-"))
+
+merge_clinical_info$barcode <- sapply(strsplit(merge_clinical_info$barcode, "-"), function(x) paste(x[1:4], collapse = "-"))
+
+merge_clinical_info <- merge(merge_clinical_info, combined_BRAF, by = "barcode", all.x = TRUE)
+
+merge_clinical_info$BRAF_mutation[is.na(merge_clinical_info$BRAF_mutation)] <- "wt"
+
+nrow(merge_clinical_info)
+#723
+
+merge_clinical_info <- merge_clinical_info %>%
+  filter(BRAF_mutation %in% c("wt"))
+nrow(merge_clinical_info)
+#666
+
+merge_clinical_info <- merge_clinical_info %>% filter(sample_type == "Primary Tumor")
+nrow(merge_clinical_info)
+#612
+
+merge_clinical_info <- merge_clinical_info %>%
+  mutate(sidedness = case_when(
+    tissue_or_organ_of_origin %in% c("Ascending colon", "Cecum", "Hepatic flexure of colon", "Transverse colon") |
+      paper_tumor_site %in% c("1 - right colon", "2 - transverse colon") ~ "Right",
+    
+    tissue_or_organ_of_origin %in% c("Rectosigmoid junction", "Descending colon", "Sigmoid colon", "Splenic flexure of colon", "Rectum, NOS") |
+      paper_tumor_site %in% c("3 - left colon", "4 - rectum")|
+      site_of_resection_or_biopsy %in% c("Cecum")~ "Left",
+    
+    TRUE ~ NA_character_
+  )) %>%
+  mutate(sidedness = replace_na(sidedness, "X"))
+
+merge_clinical_info <- merge_clinical_info %>%
+  filter(!(sidedness %in% c("X")))
+
+merge_clinical_info_eligible <- merge_clinical_info %>%
+  filter(sidedness %in% c("Left")) %>%
+  filter(KRAS_mutation %in% c("wt"))
+nrow(merge_clinical_info_eligible)
+#226
+
+merge_clinical_info_ineligible <- anti_join(merge_clinical_info, merge_clinical_info_eligible)
+nrow(merge_clinical_info_ineligible)
+#347
+
+# color palette 25
+c25 <- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "#FDBF6F", # lt orange
+  "gray70", "khaki2",
+  "maroon", "orchid1", "deeppink1", "blue1", "steelblue4",
+  "darkturquoise", "green1", "yellow4", "yellow3",
+  "darkorange4", "brown"
+)
+
+anno_ineligible <- merge_clinical_info_ineligible  %>% dplyr::select(project_id,`BRAF_mutation`, `KRAS_mutation`, `barcode`) %>%
+  filter(!duplicated(`barcode`)) %>%
+  column_to_rownames(var = "barcode")
+#224
+
+anno_eligible <- merge_clinical_info_eligible  %>% dplyr::select(project_id,`BRAF_mutation`, `KRAS_mutation`, `barcode`)%>%
+    filter(!duplicated(`barcode`)) %>%
+  column_to_rownames(var = "barcode")
+#323
+
+```
+
+## Compare myCAF/iCAF proportions between Eligible and Ineligible groups
+
+```{r}
+cibersortx_output <- read.table("~/Primarytumor/myCAF_alpha/CIBERSORTx_Adjusted.txt",sep="\t",header=T)
+
+cibersortx_output$Mixture <- sapply(strsplit(cibersortx_output$Mixture, "\\."), function(x) {
+  paste(x[1:4], collapse = "-")
+})
+
+cibersortx_output <- cibersortx_output %>%
+  filter(!duplicated(Mixture))
+
+anno_rownames_ineligible <- rownames(anno_ineligible)
+anno_rownames_eligible <- rownames(anno_eligible)
+
+cibersortx_output_ineligible <- cibersortx_output %>%
+  filter(Mixture %in% anno_rownames_ineligible)
+
+cibersortx_output_eligible <- cibersortx_output %>%
+  filter(Mixture %in% anno_rownames_eligible)
+
+#ineligible
+cibersortx_output_ineligible <- cibersortx_output_ineligible %>%
+  dplyr::select( -Epithelial.cell)
+
+tmp_ineligible <- cibersortx_output_ineligible %>%
+  dplyr::select(-P.value,-Correlation,-RMSE) %>% column_to_rownames("Mixture") %>% t()
+
+#eligible
+cibersortx_output_eligible <- cibersortx_output_eligible %>%
+  dplyr::select(-Epithelial.cell)
+
+tmp_eligible <- cibersortx_output_eligible %>%
+  dplyr::select(-P.value,-Correlation,-RMSE) %>% column_to_rownames("Mixture") %>% t()
+
+tmp_ineligible_df <- as.data.frame(tmp_ineligible)
+tmp_ineligible_df$Cell_Type <- rownames(tmp_ineligible_df)
+tmp_ineligible_long <- tmp_ineligible_df %>%
+  pivot_longer(
+    cols = -Cell_Type, 
+    names_to = "Sample",  
+    values_to = "Proportion" 
+  )
+
+tmp_ineligible_long <- tmp_ineligible_long %>%
+  group_by(Sample) %>%
+  mutate(
+    Proportion = Proportion / sum(Proportion)  
+  )
+
+cell_order <- c("myCAF", "iCAF")
+
+tmp_ineligible_long$Cell_Type <- factor(tmp_ineligible_long$Cell_Type, levels = cell_order)
+
+tmp_eligible_df <- as.data.frame(tmp_eligible)
+tmp_eligible_df$Cell_Type <- rownames(tmp_eligible_df)
+tmp_eligible_long <- tmp_eligible_df %>%
+  pivot_longer(
+    cols = -Cell_Type,  
+    names_to = "Sample", 
+    values_to = "Proportion" 
+  )
+
+tmp_eligible_long$Cell_Type <- factor(tmp_eligible_long$Cell_Type, levels = cell_order)
+
+tmp_eligible_long$Group <- "Eligible"
+tmp_ineligible_long$Group <- "Ineligible"
+
+combined_df <- rbind(tmp_eligible_long, tmp_ineligible_long)
+combined_df$Group <- factor(combined_df$Group, levels = c("Eligible", "Ineligible"))
+
+combined_df <- combined_df %>%
+  filter(!is.na(Cell_Type))
+
+#plot
+p <- ggplot(combined_df, aes(x = Group, y = Proportion)) +
+  geom_boxplot(outlier.shape = NA, fill = "lightgray", alpha = 0.4) +  
+  geom_jitter(aes(color = Group), width = 0.2, alpha = 0.5, size = 1.5) + 
+  stat_summary(fun = mean, geom = "point", shape = 18, color = "red", size = 3) + 
+  stat_summary(fun = mean, geom = "line", aes(group = 1), color = "red", size = 1.2) + 
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    label.y.npc = "top"
+  ) +
+  facet_wrap(~ Cell_Type, scales = "free_y") #Fig4C
+```
+
+# Session Information
+```{r echo=FALSE}
+sessionInfo()
+#R version 4.4.0 (2024-04-24 ucrt)
+#Platform: x86_64-w64-mingw32/x64
+#Running under: Windows 11 x64 (build 26100)
+
+#Matrix products: default
+
+
+#locale:
+#[1] LC_COLLATE=Japanese_Japan.utf8 
+#[2] LC_CTYPE=Japanese_Japan.utf8   
+#[3] LC_MONETARY=Japanese_Japan.utf8
+#[4] LC_NUMERIC=C                   
+#[5] LC_TIME=Japanese_Japan.utf8    
+
+#time zone: Asia/Tokyo
+#tzcode source: internal
+
+#attached base packages:
+#[1] stats     graphics  grDevices utils     datasets  methods  
+#[7] base     
+
+#other attached packages:
+# [1] future_1.34.0          scales_1.3.0          
+# [3] clusterProfiler_4.14.4 CellChat_2.1.2        
+# [5] Biobase_2.64.0         BiocGenerics_0.52.0   
+# [7] igraph_2.1.4           viridis_0.6.5         
+# [9] viridisLite_0.4.2      pheatmap_1.0.12       
+#[11] ktplots_2.4.0          patchwork_1.3.0       
+#[13] lubridate_1.9.4        forcats_1.0.0         
+#[15] stringr_1.5.1          dplyr_1.1.4           
+#[17] purrr_1.0.4            readr_2.1.5           
+#[19] tidyr_1.3.1            tibble_3.2.1          
+#[21] ggplot2_3.5.1          tidyverse_2.0.0       
+#[23] Seurat_5.2.1           SeuratObject_5.0.2    
+#[25] sp_2.2-0               kableExtra_1.4.0      
+
+#loaded via a namespace (and not attached):
+#  [1] fs_1.6.5                matrixStats_1.5.0      
+#  [3] spatstat.sparse_3.1-0   enrichplot_1.26.6      
+#  [5] devtools_2.4.5          httr_1.4.7             
+#  [7] RColorBrewer_1.1-3      doParallel_1.0.17      
+#  [9] profvis_0.4.0           tools_4.4.0            
+# [11] sctransform_0.4.1       backports_1.5.0        
+# [13] R6_2.6.1                lazyeval_0.2.2         
+# [15] uwot_0.2.3              GetoptLong_1.0.5       
+# [17] urlchecker_1.0.1        withr_3.0.2            
+# [19] gridExtra_2.3           progressr_0.15.1       
+# [21] cli_3.6.3               spatstat.explore_3.4-2 
+# [23] fastDummies_1.7.5       network_1.19.0         
+# [25] sass_0.4.9              spatstat.data_3.1-6    
+# [27] ggridges_0.5.6          pbapply_1.7-2          
+# [29] yulab.utils_0.2.0       systemfonts_1.2.2      
+# [31] gson_0.1.0              R.utils_2.13.0         
+# [33] DOSE_4.0.0              svglite_2.1.3          
+# [35] parallelly_1.43.0       sessioninfo_1.2.3      
+# [37] rstudioapi_0.17.1       RSQLite_2.3.9          
+# [39] FNN_1.1.4.1             gridGraphics_0.5-1     
+# [41] generics_0.1.3          shape_1.4.6.1          
+# [43] gtools_3.9.5            ica_1.0-3              
+# [45] spatstat.random_3.3-3   car_3.1-3              
+# [47] GO.db_3.20.0            Matrix_1.7-2           
+# [49] S4Vectors_0.42.1        abind_1.4-8            
+# [51] R.methodsS3_1.8.2       lifecycle_1.0.4        
+# [53] yaml_2.3.10             carData_3.0-5          
+# [55] qvalue_2.38.0           Rtsne_0.17             
+# [57] grid_4.4.0              blob_1.2.4             
+# [59] promises_1.3.2          crayon_1.5.3           
+# [61] ggtangle_0.0.6          miniUI_0.1.1.1         
+# [63] lattice_0.22-6          cowplot_1.1.3          
+# [65] KEGGREST_1.46.0         sna_2.8                
+# [67] pillar_1.10.2           knitr_1.50             
+# [69] ComplexHeatmap_2.22.0   fgsea_1.33.1           
+# [71] rjson_0.2.23            future.apply_1.11.3    
+# [73] codetools_0.2-20        fastmatch_1.1-6        
+# [75] glue_1.8.0              ggfun_0.1.8            
+# [77] spatstat.univar_3.1-2   data.table_1.17.0      
+# [79] remotes_2.5.0           treeio_1.30.0          
+# [81] vctrs_0.6.5             png_0.1-8              
+# [83] spam_2.11-1             gtable_0.3.6           
+# [85] cachem_1.1.0            xfun_0.52              
+# [87] mime_0.13               tidygraph_1.3.1        
+# [89] coda_0.19-4.1           survival_3.8-3         
+# [91] iterators_1.0.14        ellipsis_0.3.2         
+# [93] fitdistrplus_1.2-2      ROCR_1.0-11            
+# [95] nlme_3.1-168            ggtree_3.14.0          
+# [97] usethis_3.1.0           bit64_4.6.0-1          
+# [99] RcppAnnoy_0.0.22        GenomeInfoDb_1.42.3    
+#[101] bslib_0.9.0             irlba_2.3.5.1          
+#[103] KernSmooth_2.23-26      colorspace_2.1-1       
+#[105] DBI_1.2.3               tidyselect_1.2.1       
+#[107] bit_4.6.0               compiler_4.4.0         
+#[109] BiocNeighbors_2.0.1     xml2_1.3.8             
+#[111] plotly_4.10.4           lmtest_0.9-40          
+#[113] NMF_0.28                digest_0.6.37          
+#[115] goftest_1.2-3           spatstat.utils_3.1-3   
+#[117] rmarkdown_2.29          XVector_0.44.0         
+#[119] htmltools_0.5.8.1       pkgconfig_2.0.3        
+#[121] fastmap_1.2.0           UCSC.utils_1.2.0       
+#[123] rlang_1.1.5             GlobalOptions_0.1.2    
+#[125] htmlwidgets_1.6.4       shiny_1.10.0           
+#[127] farver_2.1.2            jquerylib_0.1.4        
+#[129] zoo_1.8-13              jsonlite_1.8.9         
+#[131] BiocParallel_1.40.0     statnet.common_4.11.0  
+#[133] R.oo_1.27.0             GOSemSim_2.32.0        
+#[135] magrittr_2.0.3          ggplotify_0.1.2        
+#[137] GenomeInfoDbData_1.2.13 Formula_1.2-5          
+#[139] ggnetwork_0.5.13        dotCall64_1.2          
+#[141] munsell_0.5.1           Rcpp_1.0.14            
+#[143] ape_5.8-1               reticulate_1.42.0      
+#[145] stringi_1.8.7           ggalluvial_0.12.5      
+#[147] ggraph_2.2.1            zlibbioc_1.50.0        
+#[149] MASS_7.3-65             plyr_1.8.9             
+#[151] pkgbuild_1.4.7          parallel_4.4.0         
+#[153] listenv_0.9.1           ggrepel_0.9.6          
+#[155] deldir_2.0-4            Biostrings_2.74.1      
+#[157] graphlayouts_1.2.2      splines_4.4.0          
+#[159] tensor_1.5              hms_1.1.3              
+#[161] circlize_0.4.16         ggpubr_0.6.0           
+#[163] spatstat.geom_3.3-6     ggsignif_0.6.4         
+#[165] RcppHNSW_0.6.0          rngtools_1.5.2         
+#[167] reshape2_1.4.4          stats4_4.4.0           
+#[169] pkgload_1.4.0           evaluate_1.0.3         
+#[171] BiocManager_1.30.25     tzdb_0.5.0             
+#[173] foreach_1.5.2           tweenr_2.0.3           
+#[175] httpuv_1.6.15           RANN_2.6.2             
+#[177] polyclip_1.10-7         clue_0.3-66            
+#[179] scattermore_1.2         gridBase_0.4-7         
+#[181] ggforce_0.4.2           broom_1.0.8            
+#[183] xtable_1.8-4            tidytree_0.4.6         
+#[185] RSpectra_0.16-2         rstatix_0.7.2          
+#[187] later_1.4.2             aplot_0.2.5            
+#[189] memoise_2.0.1           AnnotationDbi_1.68.0   
+#[191] registry_0.5-1          IRanges_2.38.1         
+#[193] cluster_2.1.8.1         timechange_0.3.0       
+#[195] globals_0.16.3    
+
+info <- sessionInfo()
+```
+
+paste("Analysis performed using R version", paste(info$R.version$major, info$R.version$minor, sep="."))
+[1] "Analysis performed using R version 4.4.0"
+
+```{r echo=FALSE}
+pkg.info <- getPkgInfo(info)
+kable(pkg.info, format = "html", row.names=F) %>% kable_styling()
+```

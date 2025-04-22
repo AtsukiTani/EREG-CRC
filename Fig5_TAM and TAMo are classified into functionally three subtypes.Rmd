@@ -1,0 +1,679 @@
+---
+title: "Fig5"
+author: "Atsuki Taniguchi"
+date: "`r format(Sys.time(), '%Y年%m月%d日')`"
+output:
+ html_document:
+  toc: true
+  toc_float: true
+  toc_depth: 6 
+  number_sections: true
+---
+```{=html}
+<style>
+div.blue pre { background-color:lightblue !important; }
+div.blue pre.r { background-color:lightyellow !important; }
+</style>
+```
+<div class = "blue">
+
+```{r setup, include=FALSE}
+library(kableExtra)
+
+knitr::opts_chunk$set(cache=FALSE, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.width=10, fig.height=8)
+
+```
+
+```{r}
+# Helper function for package info
+getPkgInfo <- function(info){
+  #info <- sessionInfo()
+  pkg <- info$otherPkgs
+  pkg.info <- t(sapply(pkg, function(p){
+    out <- matrix(c(Package=ifelse(is.null(p$Package),"-",p$Package),
+                    Version=ifelse(is.null(p$Version),"-",p$Version),
+                    Title=ifelse(is.null(p$Title),"-",p$Title),
+                    License=ifelse(is.null(p$License),"-",p$License),
+                    Repository=ifelse(is.null(p$Repository),"-",p$Repository)), nrow=1, ncol=5)
+  }))
+  colnames(pkg.info) <- c("Package","Version","Overview","License","Repository")
+  return(pkg.info)
+}
+```
+
+# Loading packages
+```{r}
+library(Seurat);library(tidyverse);library(patchwork);library(pheatmap);library(viridis);library(CellChat);library(clusterProfiler);library(scales);library(monocle3);library(SeuratWrappers);library(future)
+```
+
+# Subset and re-integrate Macrophages/Monocytes: Fig5A
+```{r}
+set.seed(123)
+
+obj <- readRDS("~/Primarytumor/merge_rpca_EGFR.RDS")
+
+FeaturePlot(obj, features = "CD68", reduction = "umap") #Fig5A
+
+table(obj@meta.data[["seurat_clusters"]])
+obj <- subset(obj, seurat_clusters %in% c("4", "16", "19"))
+obj <- subset(obj, condition=="Tumor")
+
+plot <- DimPlot(obj, group.by="seurat_clusters",label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+obj <- subset(obj, cells = select1)
+
+count <- table(obj@meta.data[["PatientID"]])
+patient <- names(count[count <= 70])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$PatientID %in% patient, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+count <- table(obj@meta.data[["sample"]])
+small_samples <- names(count[count < 70])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$sample %in% small_samples, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+obj@reductions <- list()
+
+obj@assays$RNA <- split(x=obj@assays$RNA, f=obj@meta.data$PatientID)
+
+obj <- NormalizeData(obj)
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj)
+obj <- RunPCA(obj)
+
+options(future.globals.maxSize = 35 * 1024^3)
+
+obj <- IntegrateLayers(object = obj, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",
+    verbose = FALSE, k.weight = 70)
+
+obj[["RNA"]] <- JoinLayers(obj[["RNA"]])
+
+obj <- FindNeighbors(obj, reduction = "integrated.rpca", dims = 1:30)
+obj <- FindClusters(obj, resolution = 0.4)
+obj <- RunUMAP(obj, dims = 1:30, reduction = "integrated.rpca")
+
+saveRDS(obj, "~/Primarytumor/Macrophage_integrated_tumor.RDS")
+
+# Prepare marker gene list for ACT
+results_df <- data.frame(cluster = integer(), genes = character(), stringsAsFactors = FALSE)
+
+for (i in 1:15) {
+    cluster_result <- markers %>%
+        filter(cluster == as.character(i-1)) %>%
+        arrange(p_val_adj) %>%
+        slice_head(n = 30) %>%
+        summarise(genes = paste(gene, collapse = ","))
+    cluster_label <- paste0("cluster", i - 1, ":", cluster_result$genes)
+    results_df <- rbind(results_df, data.frame(cluster = cluster_label, stringsAsFactors = FALSE))
+}
+
+write.table(results_df, file = "~/Primarytumor/cluster_genes_macrophage.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+# Annotate Myeloid subtypes using ACT results: Fig5B
+```{r}
+obj <- readRDS("~/Primarytumor/Macrophage_integrated_tumor.RDS")
+
+annotations <- c(
+  "0" = "Macrophage", 
+  "1" = "Macrophage", 
+  "2" = "Monocyte",  
+  "3" = "Monocyte",  
+  "4" = "Neutrophil", 
+  "5" = "Dendritic cell", 
+  "6" = "Macrophage", 
+  "7" = "Monocyte", 
+  "8" = "Macrophage", 
+  "9" = "Transit amplfying cell",  
+  "10" = "T cell", 
+  "11" = "Dendritic cell", 
+  "12" = "Dendritic cell", 
+  "13" = "Dendritic cell", 
+  "14" = "Plasma cell"
+)
+
+obj@meta.data$cell_type <- annotations[as.character(obj@meta.data$seurat_clusters)]
+Idents(obj) <- "cell_type"
+
+DimPlot(obj)+
+  theme(
+    legend.position = "bottom"
+  ) #Fig5B
+```
+
+# Exclude DCs, Neutrophils etc., and re-integrate Macrophages/Monocytes
+```{r}
+set.seed(123)
+
+obj <- readRDS("~/Primarytumor/Macrophage_integrated_tumor.RDS")
+
+table(obj@meta.data[["seurat_clusters"]])
+obj <- subset(obj, seurat_clusters %in% c("0", "1","2","3","6","7","8"))
+
+plot <- DimPlot(obj, group.by="seurat_clusters",label=T, reduction = "umap")
+select1 <- CellSelector(plot)
+obj <- subset(obj, cells = select1)
+
+count <- table(obj@meta.data[["PatientID"]])
+patient <- names(count[count <= 70])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$PatientID %in% patient, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+count <- table(obj@meta.data[["sample"]])
+small_samples <- names(count[count < 70])
+exclude_cells <- rownames(obj@meta.data[obj@meta.data$sample %in% small_samples, ])
+obj <- subset(obj, cells = setdiff(Cells(obj), exclude_cells))
+
+# Remove all reductions
+obj@reductions <- list()
+
+obj@assays$RNA <- split(x=obj@assays$RNA, f=obj@meta.data$PatientID)
+
+obj <- NormalizeData(obj)
+obj <- FindVariableFeatures(obj)
+obj <- ScaleData(obj)
+obj <- RunPCA(obj)
+
+options(future.globals.maxSize = 35 * 1024^3)
+
+obj <- IntegrateLayers(object = obj, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",
+    verbose = FALSE, k.weight = 65)
+
+obj[["RNA"]] <- JoinLayers(obj[["RNA"]])
+
+obj <- FindNeighbors(obj, reduction = "integrated.rpca", dims = 1:30)
+obj <- FindClusters(obj, resolution = 0.8)
+obj <- RunUMAP(obj, dims = 1:30, reduction = "integrated.rpca")
+
+saveRDS(obj, "~/Primarytumor/Macrophage_integrated.RDS")
+
+DimPlot(obj, label=T)
+```
+
+# Feature plots for Macrophage/Monocyte markers: suppleFig5A,B
+```{r}
+FeaturePlot(obj, features = "CD163",   reduction = "umap") #SFig5A-1
+FeaturePlot(obj, features = "MRC1",    reduction = "umap") # CD206 #SFig5A-2
+FeaturePlot(obj, features = "S100A8",  reduction = "umap") #SFig5A-3
+FeaturePlot(obj, features = "TREM2",   reduction = "umap") #SFig5A-4
+FeaturePlot(obj, features = "SPP1",    reduction = "umap") #SFig5A-5
+FeaturePlot(obj, features = "CSF1R",   reduction = "umap") #SFig5A-6
+
+FeaturePlot(obj, features = "AREG", reduction = "umap") #SFig5B-1
+FeaturePlot(obj, features = "EREG", reduction = "umap") #SFig5B-2
+```
+
+# Classify TAM/TAMo based on signaling and run CellChat: Fig5C,D
+```{r}
+set.seed(123)
+
+sc <- readRDS("~/Primarytumor/merge_rpca.RDS")
+sc$cellchat <- "NA"
+
+obj <- readRDS("~/Primarytumor/tumor_integrated.RDS")
+obj <- subset(obj, idents = c("0", "1", "2", "4", "5","7", "8", "9"))
+
+cancer_cells <- colnames(obj) 
+sc$cellchat[cancer_cells] <- "cancer cell"
+
+CAF <- readRDS("~/Primarytumor/Fibroblast_addmarkers.RDS")
+
+CAF_cells <- CAF@meta.data[["cell_type"]]
+
+myCAF_cells <- colnames(CAF)[CAF_cells == "myCAF"]
+iCAF_cells <- colnames(CAF)[CAF_cells == "iCAF"]
+apCAF_cells <- colnames(CAF)[CAF_cells == "apCAF"]
+SOX6_POSTN_CAF_cells <- colnames(CAF)[CAF_cells == "SOX6+Fib"]
+CXCL14_ADAMDEC1_CAF_cells <- colnames(CAF)[CAF_cells == "ADAMDEC1+Fib"]
+Pericyte_cells <- colnames(CAF)[CAF_cells == "Pericyte"]
+SMC_cells <- colnames(CAF)[CAF_cells == "SMC"]
+
+sc$cellchat[myCAF_cells] <- "myCAF"
+sc$cellchat[iCAF_cells] <- "iCAF"
+sc$cellchat[apCAF_cells] <- "apCAF"
+sc$cellchat[SOX6_POSTN_CAF_cells] <- "SOX6+Fib"
+sc$cellchat[CXCL14_ADAMDEC1_CAF_cells] <- "ADAMDEC1+Fib"
+sc$cellchat[Pericyte_cells] <- "Pericyte"
+sc$cellchat[SMC_cells] <- "SMC"
+
+obj <- readRDS("~/Primarytumor/Macrophage_integrated.RDS")
+
+EGF_cells <- colnames(obj)[obj@meta.data$seurat_clusters %in% c("5", "6", "7","9", "10", "11")]
+intermediate_cells <- colnames(obj)[obj@meta.data$seurat_clusters %in% c("3", "9", "12")]
+CSF_cells <- colnames(obj)[obj@meta.data$seurat_clusters %in% c("0", "1","2", "4", "8")]
+
+obj$cell_type[EGF_cells] <- "EGF_TAM/TAMo"
+obj$cell_type[intermediate_cells] <- "intermediate_TAM/TAMo"
+obj$cell_type[CSF_cells] <- "CSF_TAM/TAMo"
+
+saveRDS(obj, "~/Primarytumor/TAM_addmarker.RDS")
+
+DimPlot(obj, group.by = "cell_type")+
+  theme(
+    legend.position = "bottom"
+  ) #Fig5C
+
+sc$cellchat[EGF_cells] <- "EGF_TAM/TAMo"
+sc$cellchat[intermediate_cells] <- "intermediate_TAM/TAMo"
+sc$cellchat[CSF_cells] <- "CSF_TAM/TAMo"
+
+levels <- c(
+  "cancer cell", 
+  "myCAF", 
+  "iCAF", 
+  "apCAF", 
+  "SOX6+Fib", 
+  "ADAMDEC1+Fib", 
+  "Pericyte", 
+  "SMC",
+  "EGF_TAM/TAMo",
+  "intermediate_TAM/TAMo",
+  "CSF_TAM/TAMo"
+)
+
+sc@meta.data <- sc@meta.data %>%
+  mutate(cellchat = fct_relevel(factor(cellchat), levels))
+
+Idents(sc) <- sc@meta.data$cellchat
+
+sc <- subset(sc, subset = cellchat %in% c(
+  "cancer cell", 
+  "myCAF", 
+  "iCAF", 
+  "apCAF", 
+  "SOX6+Fib", 
+  "ADAMDEC1+Fib", 
+  "Pericyte", 
+  "SMC",
+  "EGF_TAM/TAMo",
+  "intermediate_TAM/TAMo",
+  "CSF_TAM/TAMo"
+))
+
+data.input <- sc[["RNA"]]$data # normalized data
+labels <- Idents(sc)
+meta <- data.frame(labels = labels, row.names = names(labels))
+
+cellChat <- createCellChat(object = data.input, meta  = meta, group.by = "labels")
+
+cellChat <- createCellChat(object = sc, group.by = "ident", assay = "RNA")
+# Ligand-receptor interactions in CellChat database for human
+CellChatDB <- CellChatDB.human
+
+showDatabaseCategory(CellChatDB)
+
+# Subset CellChatDB databse by only including interactions of interest
+CellChatDB.use <- subsetDB(CellChatDB)
+
+# set DB
+cellChat@DB <- CellChatDB.use
+
+# Subset the expression data of signaling genes for saving computation cost
+# update object@data.signaling
+cellChat <- subsetData(cellChat)
+
+future::plan("multisession", workers = 8)
+options(future.globals.maxSize = 30 * 1024^3) 
+
+# Identify over-expressed signaling genes associated with each cell group
+# return object@var.features
+
+cellChat <- identifyOverExpressedGenes(cellChat)
+
+# Identify over-expressed ligand-receptor interactions (pairs) within the used CellChatDB
+# return object@LR$LRsig
+cellChat <- identifyOverExpressedInteractions(cellChat)
+
+# To further speed up on large-scale datasets, USER can downsample the data using the function 'subset' from Seurat package (e.g., pbmc.small <- subset(pbmc, downsample = 500)), or using the function 'sketchData' from CellChat, in particular for the large cell clusters;
+# return object@net$prob
+cellChat <- computeCommunProb(cellChat, type = "triMean")
+
+# Filter cell-cell communication if there are only few number of cells in certain cell groups
+# update object@net
+cellChat <- filterCommunication(cellChat, min.cells = 20)
+
+# Compute the communication probability on signaling pathway level by summarizing all related ligands/receptors
+# return object@netP
+cellChat <- computeCommunProbPathway(cellChat)
+
+# Calculate the aggregated network by counting the number of links or summarizing the communication probability
+# return object@net$count, object@net$weight, object@net$sum
+cellChat <- aggregateNet(cellChat)
+
+saveRDS(cellChat, "~/Primarytumor/cellChat_TAMTAMo.RDS")
+
+cellChat <- netAnalysis_computeCentrality(cellChat, slot.name = "netP")
+
+pathways.show <- c("EGF") 
+
+# Circle plot
+par(mfrow=c(1,1))
+netVisual_aggregate(cellChat, signaling = pathways.show, layout = "circle") #Fig5D-1
+# Chord diagram
+par(mfrow=c(1,1))
+netVisual_aggregate(cellChat, signaling = pathways.show, layout = "chord")
+# Heatmap
+par(mfrow=c(1,1))
+netVisual_heatmap(cellChat, signaling = pathways.show, color.heatmap = "Reds")
+
+pathways.show <- c("CSF") 
+vertex.receiver = seq(1,4) # a numeric vector. 
+netVisual_aggregate(cellChat, signaling = pathways.show,  vertex.receiver = vertex.receiver)
+# Circle plot
+par(mfrow=c(1,1))
+netVisual_aggregate(cellChat, signaling = pathways.show, layout = "circle") #Fig5D-2
+# Chord diagram
+par(mfrow=c(1,1))
+netVisual_aggregate(cellChat, signaling = pathways.show, layout = "chord")
+# Heatmap
+par(mfrow=c(1,1))
+netVisual_heatmap(cellChat, signaling = pathways.show, color.heatmap = "Reds")
+```
+
+# GSEA of TAM/TAMo subtypes: Fig5E
+```{r}
+#M1, M2signature is from Single-cell Map of Diverse Immune Phenotypes in the Breast Tumor Microenvironment, Cell. 2018 Jun 28;174(5):1293–1308.e36. doi: 10.1016/j.cell.2018.05.060, NIHMS977868-supplement-12.xlsx
+
+c2_pathways <- read.gmt("~/Primarytumor/c2.cp.v2024.1.Hs.symbols.gmt")
+c5_pathways <- read.gmt("~/Primarytumor/c5.all.v2024.1.Hs.symbols.gmt")
+
+gmt_all <- rbind(c2_pathways, c5_pathways)
+
+focus_pathways <- c(
+  # M1
+  "KEGG_TOLL_LIKE_RECEPTOR_SIGNALING_PATHWAY",
+  "KEGG_NOD_LIKE_RECEPTOR_SIGNALING_PATHWAY",
+  "REACTOME_INTERFERON_SIGNALING",
+  "GOBP_T_CELL_ACTIVATION_INVOLVED_IN_IMMUNE_RESPONSE",
+
+  # M2
+  "KEGG_TGF_BETA_SIGNALING_PATHWAY",
+  "REACTOME_COLLAGEN_FORMATION",
+  "GOBP_REGULATION_OF_WOUND_HEALING",
+  "GOBP_REGULATION_OF_EXTRACELLULAR_MATRIX_DISASSEMBLY",
+  "BIOCARTA_IL10_PATHWAY",
+
+  # TAMo
+  "REACTOME_SIGNALING_BY_EGFR",
+  "REACTOME_SIGNALING_BY_ERBB2",
+  "REACTOME_PI3K_AKT_SIGNALING_IN_CANCER",
+
+  # CSF associated pathway
+  "GOBP_MACROPHAGE_ACTIVATION_INVOLVED_IN_IMMUNE_RESPONSE",
+  "GOBP_POSITIVE_REGULATION_OF_MACROPHAGE_DIFFERENTIATION",
+  "GOBP_REGULATION_OF_MACROPHAGE_CHEMOTAXIS",
+
+  # TME crosstalk
+  "REACTOME_INTERACTION_BETWEEN_L1_AND_ANKYRINS",
+  "KEGG_PATHWAYS_IN_CANCER"
+)
+
+gmt_focus <- gmt_all[gmt_all$term %in% focus_pathways, ]
+pathway_list <- split(gmt_focus$gene, gmt_focus$term)
+
+M1_signature <- c(
+  "NOS2",      # iNOS (inducible nitric oxide synthase)
+  "IL12B",     
+  "FCGR1A",    # FcγR1A
+  "FCGR1B",    # FcγR1B
+  "FCGR1C",    # FcγR1C
+  "CD80",
+  "CXCR3",     
+  "IL23A",    
+  "CXCL9",
+  "CXCL10",
+  "CXCL11",
+  "CD86",
+  "IL1A",
+  "IL1B",
+  "IL6",
+  "TNF",     
+  "HLA-DRA",  
+  "CCL5",
+  "IRF5",
+  "IRF1",
+  "CD40",
+  "IDO1",
+  "KYNU",
+  "CCR7"
+)
+
+M2_signature <- c(
+  "ARG1", "ARG2",
+  "IL10",
+  "FCGR2A",
+  "CD163",
+  "FCER2",
+  "CD200R1",
+  "PDCD1LG2",
+  "CD274",
+  "MARCO",
+  "CSF1R",
+  "MRC1",
+  "IL1RN",
+  "IL1R2",
+  "IL4R",
+  "CCL4",
+  "CCL13",
+  "CCL20",
+  "CCL17",
+  "CCL18",
+  "CCL22",
+  "CCL24",
+  "LYVE1",
+  "VEGFA",
+  "VEGFB",
+  "VEGFC",
+  "VEGFD",
+  "EGF",
+  "CTSA",
+  "CTSB",
+  "CTSC",
+  "CTSD",
+  "TGFB1",
+  "TGFB2",
+  "TGFB3",
+  "MMP14",
+  "MMP19",
+  "MMP9",
+  "CLEC7A",
+  "WNT7B",
+  "FASLG",
+  "TNFSF12",
+  "TNFSF8",
+  "CD276",
+  "VTCN1",
+  "MSR1",
+  "FN1",
+  "IRF4"
+)
+
+custom_pathways <- list(
+  "M1_signature" = M1_signature,
+  "M2_signature" = M2_signature
+)
+
+All_pathways <- c(pathway_list, custom_pathways)
+TERM2GENE_df <- stack(All_pathways)
+colnames(TERM2GENE_df) <- c("gene", "term")
+TERM2GENE_df <- TERM2GENE_df[, c("term", "gene")]
+
+obj <- readRDS("~/Primarytumor/TAM_addmarker.RDS")
+
+cluster_list <- c("EGF_TAM/TAMo", "intermediate_TAM/TAMo", "CSF_TAM/TAMo")
+
+gsea_list <- list()
+
+for(clust in cluster_list) {
+  deg_res <- FindMarkers(
+    object  = obj,
+    ident.1 = clust,
+    group.by = "cell_type",
+    logfc.threshold = 0,
+    min.pct = 0,
+    only.pos = FALSE
+  )
+
+  gene_list <- deg_res$avg_log2FC
+  names(gene_list) <- rownames(deg_res)
+  gene_list <- sort(gene_list, decreasing = TRUE)
+
+  gsea_res <- GSEA(
+    geneList = gene_list,
+    TERM2GENE = TERM2GENE_df,
+    minGSSize = 3,
+    maxGSSize = 500,
+    pvalueCutoff = 1,
+    verbose = FALSE
+  )
+
+  gsea_df <- as.data.frame(gsea_res)
+  gsea_df$cluster <- clust
+  gsea_list[[clust]] <- gsea_df
+}
+
+gsea_all <- do.call(rbind, gsea_list)
+
+gsea_for_heatmap <- gsea_all %>%
+  dplyr::select(ID, cluster, NES) %>%
+  pivot_wider(names_from = cluster, values_from = NES)
+
+mat <- as.matrix(gsea_for_heatmap[ , -1])
+rownames(mat) <- gsea_for_heatmap$ID
+mat <- mat[apply(mat, 1, function(x) !any(is.na(x))), ]
+
+col_order <- c(
+  "REACTOME_SIGNALING_BY_EGFR",
+  "REACTOME_SIGNALING_BY_ERBB2",
+  "M1_signature",
+  "M2_signature",
+  "KEGG_NOD_LIKE_RECEPTOR_SIGNALING_PATHWAY",
+  "BIOCARTA_IL10_PATHWAY",
+  "REACTOME_PI3K_AKT_SIGNALING_IN_CANCER",
+  "REACTOME_INTERFERON_SIGNALING",
+  "GOBP_MACROPHAGE_ACTIVATION_INVOLVED_IN_IMMUNE_RESPONSE",
+  "GOBP_REGULATION_OF_MACROPHAGE_CHEMOTAXIS",
+  "KEGG_TOLL_LIKE_RECEPTOR_SIGNALING_PATHWAY",
+  "KEGG_TGF_BETA_SIGNALING_PATHWAY",
+  "GOBP_T_CELL_ACTIVATION_INVOLVED_IN_IMMUNE_RESPONSE",
+  "REACTOME_INTERACTION_BETWEEN_L1_AND_ANKYRINS",
+  "REACTOME_COLLAGEN_FORMATION",
+  "GOBP_POSITIVE_REGULATION_OF_MACROPHAGE_DIFFERENTIATION",
+  "GOBP_REGULATION_OF_EXTRACELLULAR_MATRIX_DISASSEMBLY",
+  "GOBP_REGULATION_OF_WOUND_HEALING"
+)
+row_order <- c("EGF_TAM/TAMo", "intermediate_TAM/TAMo","CSF_TAM/TAMo")
+mat_ordered <- mat[col_order, row_order, drop = FALSE]
+
+pheatmap(
+  mat_ordered,
+  scale = "none",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  clustering_method = "ward.D2",
+  border_color = NA,
+  cellwidth = 10,  
+  cellheight = 10,  
+  fontsize = 6,
+  legend = F
+) #Fig5E
+
+```
+
+# Monocle3 trajectory analysis: Fig5F
+```{r}
+obj <- readRDS("~/Primarytumor/TAM_addmarker.RDS")
+cds <- as.cell_data_set(obj, group.by = "ident")
+
+cds <- cluster_cells(cds, resolution = 1e-5)
+cds <- learn_graph(cds, use_partition = FALSE)
+root_cells <- WhichCells(obj, idents = "10")
+cds <- order_cells(cds, root_cells = root_cells)
+
+plot_cells(cds, color_cells_by = "pseudotime", label_cell_groups = FALSE, label_leaves = FALSE, label_branch_points = FALSE, trajectory_graph_segment_size = 1.8) +
+    scale_color_viridis_c() +
+    theme_minimal() #Fig5F
+```
+# Session Information
+```{r echo=FALSE}
+sessionInfo()
+#R version 4.4.0 (2024-04-24 ucrt)
+#Platform: x86_64-w64-mingw32/x64
+#Running under: Windows 11 x64 (build 26100)
+
+#Matrix products: default
+
+
+#locale:
+#[1] LC_COLLATE=Japanese_Japan.utf8  LC_CTYPE=Japanese_Japan.utf8    LC_MONETARY=Japanese_Japan.utf8
+#[4] LC_NUMERIC=C                    LC_TIME=Japanese_Japan.utf8    
+
+#time zone: Asia/Tokyo
+#tzcode source: internal
+
+#attached base packages:
+#[1] stats4    stats     graphics  grDevices utils     datasets  methods   base     
+
+#other attached packages:
+# [1] future_1.34.0               SeuratWrappers_0.3.5        monocle3_1.3.7              SingleCellExperiment_1.28.1
+# [5] SummarizedExperiment_1.36.0 GenomicRanges_1.56.1        GenomeInfoDb_1.42.3         IRanges_2.38.1             
+# [9] S4Vectors_0.42.1            MatrixGenerics_1.18.1       matrixStats_1.5.0           scales_1.3.0               
+#[13] clusterProfiler_4.14.4      CellChat_2.1.2              Biobase_2.64.0              BiocGenerics_0.52.0        
+#[17] igraph_2.1.4                viridis_0.6.5               viridisLite_0.4.2           pheatmap_1.0.12            
+#[21] patchwork_1.3.0             lubridate_1.9.4             forcats_1.0.0               stringr_1.5.1              
+#[25] dplyr_1.1.4                 purrr_1.0.4                 readr_2.1.5                 tidyr_1.3.1                
+#[29] tibble_3.2.1                ggplot2_3.5.1               tidyverse_2.0.0             Seurat_5.2.1               
+#[33] SeuratObject_5.0.2          sp_2.2-0                    kableExtra_1.4.0           
+
+#loaded via a namespace (and not attached):
+#  [1] fs_1.6.5                spatstat.sparse_3.1-0   enrichplot_1.26.6       httr_1.4.7              RColorBrewer_1.1-3     
+#  [6] doParallel_1.0.17       tools_4.4.0             sctransform_0.4.1       backports_1.5.0         R6_2.6.1               
+# [11] lazyeval_0.2.2          uwot_0.2.3              GetoptLong_1.0.5        withr_3.0.2             gridExtra_2.3          
+# [16] progressr_0.15.1        cli_3.6.3               spatstat.explore_3.4-2  fastDummies_1.7.5       network_1.19.0         
+# [21] sass_0.4.9              spatstat.data_3.1-6     ggridges_0.5.6          pbapply_1.7-2           yulab.utils_0.2.0      
+# [26] systemfonts_1.2.2       gson_0.1.0              DOSE_4.0.0              svglite_2.1.3           R.utils_2.13.0         
+# [31] parallelly_1.43.0       rstudioapi_0.17.1       RSQLite_2.3.9           FNN_1.1.4.1             gridGraphics_0.5-1     
+# [36] generics_0.1.3          shape_1.4.6.1           ica_1.0-3               spatstat.random_3.3-3   car_3.1-3              
+# [41] GO.db_3.20.0            Matrix_1.7-2            abind_1.4-8             R.methodsS3_1.8.2       lifecycle_1.0.4        
+# [46] yaml_2.3.10             carData_3.0-5           SparseArray_1.6.1       qvalue_2.38.0           Rtsne_0.17             
+# [51] grid_4.4.0              blob_1.2.4              promises_1.3.2          crayon_1.5.3            ggtangle_0.0.6         
+# [56] miniUI_0.1.1.1          lattice_0.22-6          cowplot_1.1.3           KEGGREST_1.46.0         sna_2.8                
+# [61] pillar_1.10.2           knitr_1.50              ComplexHeatmap_2.22.0   fgsea_1.33.1            boot_1.3-31            
+# [66] rjson_0.2.23            future.apply_1.11.3     codetools_0.2-20        fastmatch_1.1-6         glue_1.8.0             
+# [71] ggfun_0.1.8             spatstat.univar_3.1-2   remotes_2.5.0           data.table_1.17.0       Rdpack_2.6.4           
+# [76] treeio_1.30.0           vctrs_0.6.5             png_0.1-8               spam_2.11-1             gtable_0.3.6           
+# [81] cachem_1.1.0            xfun_0.52               rbibutils_2.3           S4Arrays_1.4.1          mime_0.13              
+# [86] reformulas_0.4.0        coda_0.19-4.1           survival_3.8-3          iterators_1.0.14        fitdistrplus_1.2-2     
+# [91] ROCR_1.0-11             nlme_3.1-168            ggtree_3.14.0           bit64_4.6.0-1           RcppAnnoy_0.0.22       
+# [96] bslib_0.9.0             irlba_2.3.5.1           KernSmooth_2.23-26      colorspace_2.1-1        DBI_1.2.3              
+#[101] tidyselect_1.2.1        bit_4.6.0               compiler_4.4.0          BiocNeighbors_2.0.1     xml2_1.3.8             
+#[106] DelayedArray_0.32.0     plotly_4.10.4           lmtest_0.9-40           NMF_0.28                digest_0.6.37          
+#[111] goftest_1.2-3           minqa_1.2.8             spatstat.utils_3.1-3    rmarkdown_2.29          XVector_0.44.0         
+#[116] htmltools_0.5.8.1       pkgconfig_2.0.3         lme4_1.1-37             fastmap_1.2.0           rlang_1.1.5            
+#[121] GlobalOptions_0.1.2     htmlwidgets_1.6.4       UCSC.utils_1.2.0        shiny_1.10.0            farver_2.1.2           
+#[126] jquerylib_0.1.4         zoo_1.8-13              jsonlite_1.8.9          BiocParallel_1.40.0     statnet.common_4.11.0  
+#[131] R.oo_1.27.0             GOSemSim_2.32.0         magrittr_2.0.3          ggplotify_0.1.2         Formula_1.2-5          
+#[136] GenomeInfoDbData_1.2.13 ggnetwork_0.5.13        dotCall64_1.2           munsell_0.5.1           Rcpp_1.0.14            
+#[141] ape_5.8-1               reticulate_1.42.0       stringi_1.8.7           ggalluvial_0.12.5       zlibbioc_1.50.0        
+#[146] MASS_7.3-65             plyr_1.8.9              parallel_4.4.0          listenv_0.9.1           ggrepel_0.9.6          
+#[151] deldir_2.0-4            Biostrings_2.74.1       splines_4.4.0           tensor_1.5              hms_1.1.3              
+#[156] circlize_0.4.16         ggpubr_0.6.0            spatstat.geom_3.3-6     ggsignif_0.6.4          RcppHNSW_0.6.0         
+#[161] rngtools_1.5.2          reshape2_1.4.4          evaluate_1.0.3          BiocManager_1.30.25     nloptr_2.2.1           
+#[166] tzdb_0.5.0              foreach_1.5.2           httpuv_1.6.15           RANN_2.6.2              polyclip_1.10-7        
+#[171] clue_0.3-66             scattermore_1.2         gridBase_0.4-7          rsvd_1.0.5              broom_1.0.8            
+#[176] xtable_1.8-4            tidytree_0.4.6          RSpectra_0.16-2         rstatix_0.7.2           later_1.4.2            
+#[181] aplot_0.2.5             memoise_2.0.1           AnnotationDbi_1.68.0    registry_0.5-1          cluster_2.1.8.1        
+#[186] timechange_0.3.0        globals_0.16.3 
+
+info <- sessionInfo()
+```
+
+paste("Analysis performed using R version", paste(info$R.version$major, info$R.version$minor, sep="."))
+[1] "Analysis performed using R version 4.4.0"
+
+```{r echo=FALSE}
+pkg.info <- getPkgInfo(info)
+kable(pkg.info, format = "html", row.names=F) %>% kable_styling()
+```
+
+

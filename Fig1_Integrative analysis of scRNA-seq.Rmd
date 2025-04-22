@@ -1,0 +1,423 @@
+---
+title: "Fig1"
+author: "Atsuki Taniguchi"
+date: "`r format(Sys.time(), '%Y年%m月%d日')`"
+output:
+ html_document:
+  toc: true
+  toc_float: true
+  toc_depth: 6 
+  number_sections: true
+---
+
+```{=html}
+<style>
+div.blue pre { background-color:lightblue !important; }
+div.blue pre.r { background-color:lightyellow !important; }
+</style>
+```
+<div class = "blue">
+
+```{r setup, include=FALSE}
+library(kableExtra)
+
+knitr::opts_chunk$set(cache=FALSE, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.width=10, fig.height=8)
+
+```
+
+```{r}
+
+# Helper function for package info
+getPkgInfo <- function(info){
+  #info <- sessionInfo()
+  pkg <- info$otherPkgs
+  pkg.info <- t(sapply(pkg, function(p){
+    out <- matrix(c(Package=ifelse(is.null(p$Package),"-",p$Package),
+                    Version=ifelse(is.null(p$Version),"-",p$Version),
+                    Title=ifelse(is.null(p$Title),"-",p$Title),
+                    License=ifelse(is.null(p$License),"-",p$License),
+                    Repository=ifelse(is.null(p$Repository),"-",p$Repository)), nrow=1, ncol=5)
+  }))
+  colnames(pkg.info) <- c("Package","Version","Overview","License","Repository")
+  return(pkg.info)
+}
+```
+
+# Loading pacakge
+```{r echo=TRUE}
+library(ggplot2);library(Seurat);library(tidyverse);library(readxl);library(patchwork)
+```
+
+
+# Load Metadata and Create Seurat Objects
+## Load Clinical Metadata
+```{r}
+set.seed(123)
+
+SG1_meta     <- read_excel("~/Primarytumor/primary_scRNA-seq_clinical_metadata.xlsx", sheet="CRC-SG1")
+SG2_meta     <- read_excel("~/Primarytumor/primary_scRNA-seq_clinical_metadata.xlsx", sheet="CRC-SG2")
+KUL3_meta     <- read_excel("~/Primarytumor/primary_scRNA-seq_clinical_metadata.xlsx", sheet="KUL3")
+KUL5_meta     <- read_excel("~/Primarytumor/primary_scRNA-seq_clinical_metadata.xlsx", sheet="KUL5")
+CAC_meta     <- read_excel("~/Primarytumor/primary_scRNA-seq_clinical_metadata.xlsx", sheet="CAC")
+SMC_meta     <- read_excel("~/Primarytumor/primary_scRNA-seq_clinical_metadata.xlsx", sheet="SMC")
+
+```
+
+## GSE200997 (CAC) Dataset
+Source: GSE200997
+Format: Count matrix (.csv)
+```{r echo=TRUE}
+obj_CAC <- read.csv("~/Primarytumor/CAC/GSE200997_GEO_processed_CRC_10X_raw_UMI_count_matrix.csv")
+obj_CAC <- CreateSeuratObject(counts = obj_CAC, project = "CAC",min.cells = 3, min.features = 200)
+
+# Extract sample names from cell barcodes
+obj_CAC@meta.data <- obj_CAC@meta.data %>% mutate(sample = substring(rownames(.),1,nchar(rownames(.))-17))
+
+Idents(obj_CAC) <- obj_CAC@meta.data %>% select(sample) %>% pull(1) %>% as.factor()
+
+# Add clinical metadata
+obj_CAC@meta.data <- left_join(obj_CAC@meta.data %>% rownames_to_column("X"), CAC_meta, by=c("sample" = "SampleID")) %>% column_to_rownames("X")
+
+SaveSeuratRds(obj_CAC, "~/Primarytumor/object_CAC.Rds")
+```
+
+## KUL3, KUL5, SG1, SG2, SMC Datasets
+Source: EGA/Synapse
+Format: H5 file
+```{r echo=TRUE}
+obj_Epithelial <- Read10X_h5("~/Primarytumor/KUL3_KUL5_CRC-SG1_CRC-SG2_SMC/Epithelial_Count_matrix.h5")
+obj_Epithelial <- CreateSeuratObject(counts = obj_Epithelial, project = "Epithelial",min.cells = 3, min.features = 200)
+obj_NonEpithelial  <- Read10X_h5("~/Primarytumor/KUL3_KUL5_CRC-SG1_CRC-SG2_SMC/NonEpithelial_Count_matrix.h5")
+obj_NonEpithelial <- CreateSeuratObject(counts = obj_NonEpithelial, project = "NonEpithelial",min.cells = 3, min.features = 200)
+
+# Merge epithelial and non-epithelial objects
+obj_merge <- merge(x=obj_Epithelial, y=obj_NonEpithelial) 
+obj_merge@meta.data <- obj_merge@meta.data %>% 
+            mutate(sample = substring(rownames(.),1,nchar(rownames(.))-19)) %>% 
+            mutate(sample = substring(sample,unlist(gregexpr("_",sample))+1))
+  
+# Add clinical metadata
+merge_meta <- rbind(SG1_meta,SG2_meta)
+merge_meta <- rbind(merge_meta,KUL3_meta)
+merge_meta <- rbind(merge_meta,KUL5_meta)
+merge_meta <- rbind(merge_meta,SMC_meta)
+target <- merge_meta %>% select(SampleID) %>% pull(1)
+
+Idents(obj_merge) <- obj_merge@meta.data %>% select(sample) %>% pull(1) %>% as.factor()
+  
+obj_merge <- subset(x=obj_merge,idents = target)
+obj_merge@meta.data <- left_join(obj_merge@meta.data %>% rownames_to_column("X"), merge_meta, by=c("sample" = "SampleID")) %>% column_to_rownames("X")
+
+SaveSeuratRds(obj_merge,"~/Primarytumor/object_KUL3_KUL5_SG1_SG2_SMC.Rds")
+```
+
+# Filter, Merge, and Pre-process Objects
+```{r}
+obj_CAC <- readRDS("~/Primarytumor/object_CAC.Rds")
+obj_KUL3_KUL5_SG1_SG2_SMC <- readRDS("~/Primarytumor/object_KUL3_KUL5_SG1_SG2_SMC.Rds")
+
+# Filter CAC
+CAC_1 <- subset(obj_CAC, subset = Sidedness == "L" & BRAF == "wt" & `MSS/MSI` == "MSS") 
+CAC_2 <- subset(obj_CAC, subset = Sidedness == "R" & `MSS/MSI` == "MSS" & BRAF == "wt")
+obj_CAC <- merge(CAC_1, y = CAC_2)
+
+# Filter KUL etc.
+CAC_1 <- subset(obj_KUL3_KUL5_SG1_SG2_SMC, subset = Sidedness == "L" &  BRAF == "wt" & `MSS/MSI` == "MSS")
+CAC_2 <- subset(obj_KUL3_KUL5_SG1_SG2_SMC, subset = Sidedness == "R" & `MSS/MSI` == "MSS" & BRAF == "wt")
+obj_KUL3_KUL5_SG1_SG2_SMC <- merge(CAC_1, y = CAC_2)
+
+# obj_KUL3_KUL5_SG1_SG2_SMC@assays$RNA@layers$のmerge(epithelial, nonepithelial)
+obj_CAC <- JoinLayers(object=obj_CAC)
+sc <- JoinLayers(object=obj_KUL3_KUL5_SG1_SG2_SMC)
+
+# Prepare for Integration
+sc@assays$RNA <- split(x=sc@assays$RNA, f=sc@meta.data$dataset)
+
+# Extract common genes BEFORE merging the two main objects
+genes_obj_CAC <- rownames(obj_CAC)
+genes_sc <- rownames(sc)
+common_genes <- intersect(genes_obj_CAC, genes_sc)
+obj_CAC <- obj_CAC[common_genes, ]
+sc <- sc[common_genes, ]
+
+# Merge the two filtered objects
+obj_merge <- merge(x=sc, y=obj_CAC)
+
+saveRDS(obj_merge,"~/Primarytumor/object_merge_LR.Rds") 
+
+# Calculate Mitochondrial percentagex
+obj_merge[["percent.mt"]] <- PercentageFeatureSet(obj_merge, pattern="^MT-")
+head(obj_merge@meta.data, 5)
+
+# Quality Control Plots
+VlnPlot(obj_merge, features = "nFeature_RNA")
+VlnPlot(obj_merge, features = "nCount_RNA")
+VlnPlot(obj_merge, features = "percent.mt")
+```
+
+# Standard workflow (Un-integrated analysis - Normalization, Scaling, PCA)
+```{r}
+set.seed(123)
+
+obj_merge <- NormalizeData(obj_merge)
+obj_merge <- FindVariableFeatures(obj_merge)
+obj_merge <- ScaleData(obj_merge)
+obj_merge <- RunPCA(obj_merge)
+
+# Elbow plot to determine dimensions
+ElbowPlot(obj_merge)
+
+# Clustering and UMAP (Un-integrated)
+obj_merge <- FindNeighbors(obj_merge, dims = 1:30, reduction = "pca")
+obj_merge <- FindClusters(obj_merge, resolution = 1, cluster.name = "unintegrated_clusters")
+obj_merge <- RunUMAP(obj_merge, dims = 1:30, reduction = "pca", reduction.name = "umap.unintegrated")
+
+saveRDS(obj_merge, "~/Primarytumor/unintegrated_merge_rpca_LR.RDS")
+```
+
+# Integrate Datasets (RPCA):Fig1B,1E,supple1A,supple1B
+
+```{r}
+set.seed(123)
+obj_merge <- readRDS("~/Primarytumor/unintegrated_merge_rpca_LR.RDS")
+
+# Set max size for globals
+options(future.globals.maxSize = 100 * 1024^3)
+
+# Integrate using RPCA
+obj_merge <- IntegrateLayers(object = obj_merge, method = RPCAIntegration, orig.reduction = "pca", new.reduction = "integrated.rpca",
+    verbose = FALSE)
+
+# re-join layers after integration
+obj_merge[["RNA"]] <- JoinLayers(obj_merge[["RNA"]])
+
+# Downstream analysis on integrated data
+obj_merge <- FindNeighbors(obj_merge, reduction = "integrated.rpca", dims = 1:30)
+
+saveRDS(obj_merge, "~/Primarytumor/pre-resolution_merge_rpca_LR.RDS")
+
+obj_merge <- FindClusters(obj_merge, resolution = 0.3)
+obj_merge <- RunUMAP(obj_merge, dims = 1:30, reduction = "integrated.rpca")
+
+saveRDS(obj_merge, "~/Primarytumor/merge_rpca_LR.RDS")
+
+DimPlot(obj_merge, reduction = "umap", label = T,repel = TRUE) #Fig1B
+DimPlot(obj_merge, group.by = "dataset", reduction = "umap") #suppleFig1A
+DimPlot(obj_merge, group.by = "RAS", reduction = "umap") #suppleFig1B
+DimPlot(obj_merge, group.by = "Sidedness", reduction = "umap") #Fig1E
+```
+
+# Cell Type Annotation
+## Manual Annotation Based on Markers
+```{r}
+data <- FindAllMarkers(obj_merge, 
+                          only.pos = T,
+                          logfc.threshold = 1,
+                          min.pct = 0.3)
+
+annotations <- c(
+  "0" = "T cell", 
+  "1" = "T cell", 
+  "2" = "Plasma cell",  
+  "3" = "Epithelial cell",  
+  "4" = "Myeloid cell", 
+  "5" = "B cell", 
+  "6" = "Fibroblast", 
+  "7" = "Endothelial cell", 
+  "8" = "Fibroblast", 
+  "9" = "Epithelial cell",  
+  "10" = "Fibroblast", 
+  "11" = "Pericyte", 
+  "12" = "Epithelial cell", 
+  "13" = "Not.defined", #Glial cell
+  "14" = "Not.defined", #Transit amplifying cell
+  "15" = "Fibroblast", 
+  "16" = "Myeloid cell",  
+  "17" = "T cell", 
+  "18" = "T cell",  
+  "19" = "Myeloid cell", 
+  "20" = "Epithelial cell",
+  "21" = "Endothelial cell", 
+  "22" = "B cell"
+)
+
+clusters <- Idents(obj_merge)
+obj_merge@meta.data$cell_type <- annotations[as.character(clusters)]
+
+saveRDS(obj_merge, "~/Primarytumor/merge_rpca_LR.RDS")
+```
+
+## Generate Top Marker List for Text File for ACT
+```{r}
+results_df <- data.frame(cluster = integer(), genes = character(), stringsAsFactors = FALSE)
+
+for (i in 1:25) {
+    cluster_result <- data %>%
+        filter(cluster == as.character(i-1)) %>%
+        arrange(p_val_adj) %>%
+        slice_head(n = 30) %>%
+        summarise(genes = paste(gene, collapse = ","))
+
+    cluster_label <- paste0("cluster", i - 1, ":", cluster_result$genes)
+    results_df <- rbind(results_df, data.frame(cluster = cluster_label, stringsAsFactors = FALSE))
+}
+
+write.table(results_df, file = "~/Primarytumor/cluster_genes_LR.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+
+## Cell Type Marker Heatmap: FigC,D,F
+```{r}
+obj <- readRDS("~/Primarytumor/merge_rpca_LR.RDS")
+
+DimPlot(obj, reduction = "umap", group.by = "cell_type") #Fig1D
+Idents(obj) <- obj@meta.data$cell_type
+obj <- subset(obj, cell_type != "not.defined")
+
+markers <- FindAllMarkers(obj, 
+                          only.pos = T,
+                          logfc.threshold = 1,
+                          min.pct = 0.4)
+
+write.csv(markers, "~/Primarytumor/markers.csv")
+
+markers %>%
+    group_by(cluster) %>%
+    slice_head(n = 6) %>%
+    ungroup() -> top6
+
+genes <- top6 %>% pull(gene)
+
+obj <- ScaleData(obj, features = genes)
+obj <- subset(obj, downsample = 5000)
+
+DoHeatmap(obj, features = top6$gene, group.by = "cell_type",) + NoLegend() #Fig1C
+
+obj <- readRDS("./merge_rpca_EGFR.RDS")
+DimPlot(obj,group.by = "EGFR_efficacy", reduction = "umap") #Fig1F
+```
+
+# Session Information
+
+```{r echo=FALSE}
+sessionInfo()
+#R version 4.4.0 (2024-04-24 ucrt)
+#Platform: x86_64-w64-mingw32/x64
+#Running under: Windows 11 x64 (build 26100)
+
+#Matrix products: default
+
+
+#locale:
+#[1] LC_COLLATE=Japanese_Japan.utf8 
+#[2] LC_CTYPE=Japanese_Japan.utf8   
+#[3] LC_MONETARY=Japanese_Japan.utf8
+#[4] LC_NUMERIC=C                   
+#[5] LC_TIME=Japanese_Japan.utf8    
+
+#time zone: Asia/Tokyo
+#tzcode source: internal
+
+#attached base packages:
+#[1] stats     graphics  grDevices utils     datasets  methods  
+#[7] base     
+
+#other attached packages:
+# [1] patchwork_1.3.0    readxl_1.4.5       lubridate_1.9.4   
+# [4] forcats_1.0.0      stringr_1.5.1      dplyr_1.1.4       
+# [7] purrr_1.0.4        readr_2.1.5        tidyr_1.3.1       
+#[10] tibble_3.2.1       tidyverse_2.0.0    Seurat_5.2.1      
+#[13] SeuratObject_5.0.2 sp_2.2-0           ggplot2_3.5.1     
+#[16] kableExtra_1.4.0  
+
+#loaded via a namespace (and not attached):
+#  [1] RcppAnnoy_0.0.22            splines_4.4.0              
+#  [3] later_1.4.2                 bitops_1.0-9               
+#  [5] cellranger_1.1.0            polyclip_1.10-7            
+#  [7] fastDummies_1.7.5           lifecycle_1.0.4            
+#  [9] fastcluster_1.2.6           edgeR_4.4.2                
+# [11] doParallel_1.0.17           globals_0.16.3             
+# [13] lattice_0.22-6              MASS_7.3-65                
+# [15] magrittr_2.0.3              rmarkdown_2.29             
+# [17] limma_3.62.2                plotly_4.10.4              
+# [19] yaml_2.3.10                 httpuv_1.6.15              
+# [21] sctransform_0.4.1           spam_2.11-1                
+# [23] spatstat.sparse_3.1-0       reticulate_1.42.0          
+# [25] cowplot_1.1.3               pbapply_1.7-2              
+# [27] RColorBrewer_1.1-3          multcomp_1.4-28            
+# [29] abind_1.4-8                 zlibbioc_1.50.0            
+# [31] Rtsne_0.17                  GenomicRanges_1.56.1       
+# [33] BiocGenerics_0.52.0         TH.data_1.1-3              
+# [35] sandwich_3.1-1              GenomeInfoDbData_1.2.13    
+# [37] IRanges_2.38.1              S4Vectors_0.42.1           
+# [39] ggrepel_0.9.6               irlba_2.3.5.1              
+# [41] listenv_0.9.1               spatstat.utils_3.1-3       
+# [43] goftest_1.2-3               RSpectra_0.16-2            
+# [45] spatstat.random_3.3-3       fitdistrplus_1.2-2         
+# [47] parallelly_1.43.0           svglite_2.1.3              
+# [49] codetools_0.2-20            coin_1.4-3                 
+# [51] DelayedArray_0.32.0         xml2_1.3.8                 
+# [53] tidyselect_1.2.1            futile.logger_1.4.3        
+# [55] UCSC.utils_1.2.0            farver_2.1.2               
+# [57] rjags_4-17                  matrixStats_1.5.0          
+# [59] stats4_4.4.0                spatstat.explore_3.4-2     
+# [61] jsonlite_1.8.9              progressr_0.15.1           
+# [63] ggridges_0.5.6              survival_3.8-3             
+# [65] iterators_1.0.14            systemfonts_1.2.2          
+# [67] foreach_1.5.2               tools_4.4.0                
+# [69] ica_1.0-3                   Rcpp_1.0.14                
+# [71] glue_1.8.0                  gridExtra_2.3              
+# [73] SparseArray_1.6.1           xfun_0.52                  
+# [75] MatrixGenerics_1.18.1       GenomeInfoDb_1.42.3        
+# [77] withr_3.0.2                 formatR_1.14               
+# [79] fastmap_1.2.0               caTools_1.18.3             
+# [81] digest_0.6.37               timechange_0.3.0           
+# [83] parallelDist_0.2.6          R6_2.6.1                   
+# [85] mime_0.13                   colorspace_2.1-1           
+# [87] scattermore_1.2             gtools_3.9.5               
+# [89] tensor_1.5                  spatstat.data_3.1-6        
+# [91] generics_0.1.3              data.table_1.17.0          
+# [93] httr_1.4.7                  htmlwidgets_1.6.4          
+# [95] S4Arrays_1.4.1              infercnv_1.22.0            
+# [97] uwot_0.2.3                  pkgconfig_2.0.3            
+# [99] gtable_0.3.6                modeltools_0.2-23          
+#[101] lmtest_0.9-40               SingleCellExperiment_1.28.1
+#[103] XVector_0.44.0              htmltools_0.5.8.1          
+#[105] dotCall64_1.2               scales_1.3.0               
+#[107] Biobase_2.64.0              png_0.1-8                  
+#[109] phyclust_0.1-34             spatstat.univar_3.1-2      
+#[111] knitr_1.50                  lambda.r_1.2.4             
+#[113] rstudioapi_0.17.1           tzdb_0.5.0                 
+#[115] reshape2_1.4.4              coda_0.19-4.1              
+#[117] nlme_3.1-168                zoo_1.8-13                 
+#[119] KernSmooth_2.23-26          parallel_4.4.0             
+#[121] miniUI_0.1.1.1              libcoin_1.0-10             
+#[123] pillar_1.10.2               grid_4.4.0                 
+#[125] vctrs_0.6.5                 RANN_2.6.2                 
+#[127] gplots_3.2.0                promises_1.3.2             
+#[129] xtable_1.8-4                cluster_2.1.8.1            
+#[131] evaluate_1.0.3              mvtnorm_1.3-3              
+#[133] cli_3.6.3                   locfit_1.5-9.12            
+#[135] compiler_4.4.0              futile.options_1.0.1       
+#[137] rlang_1.1.5                 crayon_1.5.3               
+#[139] future.apply_1.11.3         argparse_2.2.5             
+#[141] plyr_1.8.9                  stringi_1.8.7              
+#[143] viridisLite_0.4.2           deldir_2.0-4               
+#[145] munsell_0.5.1               lazyeval_0.2.2             
+#[147] spatstat.geom_3.3-6         Matrix_1.7-2               
+#[149] RcppHNSW_0.6.0              hms_1.1.3                  
+#[151] future_1.34.0               statmod_1.5.0              
+#[153] shiny_1.10.0                SummarizedExperiment_1.36.0
+#[155] ROCR_1.0-11                 igraph_2.1.4               
+#[157] RcppParallel_5.1.10         ape_5.8-1                  
+
+info <- sessionInfo()
+```
+
+paste("Analysis performed using R version", paste(info$R.version$major, info$R.version$minor, sep="."))
+[1] "Analysis performed using R version 4.4.0"
+
+```{r echo=FALSE}
+pkg.info <- getPkgInfo(info)
+kable(pkg.info, format = "html", row.names=F) %>% kable_styling()
+```
