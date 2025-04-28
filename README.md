@@ -2,6 +2,8 @@
 
 Code repository for the paper: **"Multi-transcriptomic Analysis Reveals that EREG-driven TME Crosstalk Defines Anti-EGFR Response in Colorectal Cancer"**
 
+[![DOI](https://zenodo.org/badge/969441135.svg)](https://doi.org/10.5281/zenodo.15298304)
+
 ## Overview
 
 This repository contains the R scripts and associated files used to perform the single-cell RNA-seq, spatial transcriptomics (Visium), and integrated multi-omics analyses presented in the paper. The study investigates the role of Epiregulin (EREG) and the tumor microenvironment (TME) in determining the response to anti-EGFR therapy in colorectal cancer (CRC), analyzing differences based on tumor sidedness and identifying key cellular interactions within the EREG/EGFR/CSF signaling axis.
